@@ -267,11 +267,10 @@ with st.sidebar:
     if st.button("더미 데이터 생성", use_container_width=True):
         all_t, all_d = [], []
         per_n = max(n_trades // len(dummy_exchanges), 10) if dummy_exchanges else n_trades
-        per_b = initial_balance / max(len(dummy_exchanges), 1)
         for i, en in enumerate(dummy_exchanges or ["Binance"]):
             tdf = generate_trades(per_n, en, n_days, start_id=i * per_n)
             all_t.append(tdf)
-            dep = generate_deposits(per_b)
+            dep = generate_deposits(initial_balance)  # 거래소별 각각 초기 잔고
             dep.insert(1, "exchange", en)
             all_d.append(dep)
         combined = pd.concat(all_t, ignore_index=True).sort_values("datetime").reset_index(drop=True)

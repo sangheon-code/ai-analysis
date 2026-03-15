@@ -11,7 +11,11 @@ from .config import SYMBOLS, SIDES, PRICE_MAP
 
 def generate_trades(n: int, exchange: str, days: int = 30,
                     start_id: int = 0) -> pd.DataFrame:
-    """거래소 API 형태의 더미 거래 데이터 생성"""
+    """
+    거래소 API 형태의 더미 거래 데이터 생성.
+    - 레버리지에 따른 청산(liquidation) 시뮬레이션 포함
+    - 손실 시 마진 대비 제한 (레버리지 고려)
+    """
     np.random.seed(None)
     rows = []
     base_time = datetime.now() - timedelta(days=days)
@@ -38,16 +42,41 @@ def generate_trades(n: int, exchange: str, days: int = 30,
         base_price = PRICE_MAP.get(symbol, 100)
         entry_price = base_price * np.random.uniform(0.92, 1.08)
 
+        # 청산 기준: 마진의 ~85% 손실 시 강제 청산 (유지 마진 고려)
+        # 청산 가격 이동률 = 1 / leverage * 0.85
+        liq_pct = 0.85 / leverage
+
         if win:
             pct = np.random.exponential(0.02)
-            exit_price = entry_price * (1 + pct) if side == "LONG" else entry_price * (1 - pct)
+            # 수익도 현실적 범위로 제한 (한 거래에서 마진의 200% 이상 수익은 드묾)
+            pct = min(pct, 2.0 / leverage)
         else:
             pct = np.random.exponential(0.025)
+            if pct >= liq_pct:
+                # 청산 발생 → 마진 전액 손실 (-100%)
+                pct = liq_pct
+                is_liquidation = True
+            else:
+                is_liquidation = False
+
+        # exit_price 계산
+        if win:
+            exit_price = entry_price * (1 + pct) if side == "LONG" else entry_price * (1 - pct)
+        else:
             exit_price = entry_price * (1 - pct) if side == "LONG" else entry_price * (1 + pct)
 
-        qty = np.random.uniform(100, 2000)
-        pnl = qty * leverage * pct * (1 if win else -1)
-        fee = qty * leverage * 0.0008
+        qty = np.random.uniform(100, 2000)  # 마진(USDT)
+
+        if win:
+            pnl = qty * leverage * pct
+        else:
+            if not win and pct >= liq_pct:
+                # 청산: 마진 전액 손실
+                pnl = -qty
+            else:
+                pnl = -qty * leverage * pct
+
+        fee = qty * leverage * 0.0008  # taker 0.04% × 2 (open+close)
 
         dt = base_time + timedelta(
             days=np.random.randint(0, days),
