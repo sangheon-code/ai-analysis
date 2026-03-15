@@ -261,16 +261,25 @@ with st.sidebar:
         n_trades = st.number_input("건수", 10, 500, 100, step=10, key="n_trades")
     with c_b:
         n_days = st.number_input("기간(일)", 7, 90, 30, step=7, key="n_days")
-    initial_balance = st.number_input("초기 잔고(USDT)", 100, 1_000_000, 10_000, step=1000)
     dummy_exchanges = st.multiselect("거래소", EXCHANGES, default=["Binance"], key="dummy_ex")
+
+    # 거래소별 초기 잔고 설정
+    ex_balances = {}
+    for dex in (dummy_exchanges or ["Binance"]):
+        ex_balances[dex] = st.number_input(
+            f"{dex} 초기 잔고(USDT)", 100, 1_000_000, 10_000, step=1000,
+            key=f"bal_{dex}",
+        )
 
     if st.button("더미 데이터 생성", use_container_width=True):
         all_t, all_d = [], []
-        per_n = max(n_trades // len(dummy_exchanges), 10) if dummy_exchanges else n_trades
-        for i, en in enumerate(dummy_exchanges or ["Binance"]):
+        exes = dummy_exchanges or ["Binance"]
+        per_n = max(n_trades // len(exes), 10)
+        for i, en in enumerate(exes):
             tdf = generate_trades(per_n, en, n_days, start_id=i * per_n)
             all_t.append(tdf)
-            dep = generate_deposits(initial_balance)  # 거래소별 각각 초기 잔고
+            bal = ex_balances.get(en, 10_000)
+            dep = generate_deposits(bal)
             dep.insert(1, "exchange", en)
             all_d.append(dep)
         combined = pd.concat(all_t, ignore_index=True).sort_values("datetime").reset_index(drop=True)
@@ -427,56 +436,89 @@ elif "exchange" in df.columns:
 
 
 # ══════════════════════════════════════════════════
-# SECTION: 누적 손익 곡선
+# SECTION: 자산 곡선 (수익금 + 수익률)
 # ══════════════════════════════════════════════════
-st.markdown('<div class="section-hdr">누적 손익 곡선</div>', unsafe_allow_html=True)
+st.markdown('<div class="section-hdr">자산 곡선</div>', unsafe_allow_html=True)
 render_ai("equity_curve")
 
-fig_eq = go.Figure()
 ds = df.sort_values("datetime").copy()
-ds["cum"] = ds["net_pnl"].cumsum()
+ds["cum_pnl"] = ds["net_pnl"].cumsum()
+ds["equity"] = init_bal + ds["cum_pnl"]
+ds["roi_pct"] = ds["cum_pnl"] / init_bal * 100
 multi_ex = "exchange" in df.columns and df["exchange"].nunique() > 1
 
-# 누적 PnL 라인
-fig_eq.add_trace(go.Scatter(
-    x=ds["datetime"], y=ds["cum"], mode="lines",
-    name="통합" if multi_ex else "누적 PnL",
-    line=dict(color=_C["primary"], width=2.5),
-    fill="tozeroy", fillcolor="rgba(107,138,255,0.06)",
-))
+# 거래소별 초기 잔고 매핑
+_dep = st.session_state.deposits
+_ex_bal = {}
+if not _dep.empty and "exchange" in _dep.columns:
+    _ex_bal = _dep.groupby("exchange")["amount_usdt"].sum().to_dict()
 
-# 거래소별 라인 (멀티)
-if multi_ex:
-    for en, grp in df.groupby("exchange"):
-        g = grp.sort_values("datetime").copy()
-        g["cum"] = g["net_pnl"].cumsum()
-        fig_eq.add_trace(go.Scatter(
-            x=g["datetime"], y=g["cum"], mode="lines", name=en,
-            line=dict(color=_EX_COLOR.get(en, "#888"), width=1.5, dash="dot"),
-        ))
+eq_col1, eq_col2 = st.columns(2)
 
-# 개별 거래 마커 (수익=초록, 손실=빨강)
-wins_ds = ds[ds["net_pnl"] >= 0]
-loss_ds = ds[ds["net_pnl"] < 0]
-fig_eq.add_trace(go.Scatter(
-    x=wins_ds["datetime"], y=wins_ds["cum"], mode="markers", name="수익 거래",
-    marker=dict(color=_C["profit"], size=5, opacity=0.6, symbol="circle"),
-    hovertemplate="%{customdata[0]}<br>%{customdata[1]}<br>PnL: %{customdata[2]}<extra></extra>",
-    customdata=list(zip(wins_ds["symbol"], wins_ds["side"], [f"+${v:,.0f}" for v in wins_ds["net_pnl"]])),
-))
-fig_eq.add_trace(go.Scatter(
-    x=loss_ds["datetime"], y=loss_ds["cum"], mode="markers", name="손실 거래",
-    marker=dict(color=_C["loss"], size=5, opacity=0.6, symbol="circle"),
-    hovertemplate="%{customdata[0]}<br>%{customdata[1]}<br>PnL: %{customdata[2]}<extra></extra>",
-    customdata=list(zip(loss_ds["symbol"], loss_ds["side"], [f"${v:,.0f}" for v in loss_ds["net_pnl"]])),
-))
+# ── 수익금 그래프 ────────────────────────────────
+with eq_col1:
+    st.markdown("**수익금 (Equity)**")
+    fig_eq = go.Figure()
+    fig_eq.add_trace(go.Scatter(
+        x=ds["datetime"], y=ds["equity"], mode="lines",
+        name="통합" if multi_ex else "자산",
+        line=dict(color=_C["primary"], width=2.5),
+        fill="tozeroy", fillcolor="rgba(107,138,255,0.06)",
+    ))
+    if multi_ex:
+        for en, grp in df.groupby("exchange"):
+            g = grp.sort_values("datetime").copy()
+            eb = _ex_bal.get(en, init_bal)
+            g["equity"] = eb + g["net_pnl"].cumsum()
+            fig_eq.add_trace(go.Scatter(
+                x=g["datetime"], y=g["equity"], mode="lines", name=en,
+                line=dict(color=_EX_COLOR.get(en, "#888"), width=1.5, dash="dot"),
+            ))
+    # 거래 마커
+    wins_ds = ds[ds["net_pnl"] >= 0]
+    loss_ds = ds[ds["net_pnl"] < 0]
+    fig_eq.add_trace(go.Scatter(
+        x=wins_ds["datetime"], y=wins_ds["equity"], mode="markers", name="수익",
+        marker=dict(color=_C["profit"], size=4, opacity=0.5),
+        hovertemplate="%{customdata[0]} %{customdata[1]}<br>%{customdata[2]}<extra></extra>",
+        customdata=list(zip(wins_ds["symbol"], wins_ds["side"], [f"+${v:,.0f}" for v in wins_ds["net_pnl"]])),
+    ))
+    fig_eq.add_trace(go.Scatter(
+        x=loss_ds["datetime"], y=loss_ds["equity"], mode="markers", name="손실",
+        marker=dict(color=_C["loss"], size=4, opacity=0.5),
+        hovertemplate="%{customdata[0]} %{customdata[1]}<br>%{customdata[2]}<extra></extra>",
+        customdata=list(zip(loss_ds["symbol"], loss_ds["side"], [f"${v:,.0f}" for v in loss_ds["net_pnl"]])),
+    ))
+    fig_eq.add_hline(y=init_bal, line_dash="dash", line_color="#4a4a6a", line_width=1,
+                     annotation_text="초기 잔고", annotation_font_color="#7b7b9e")
+    fig_eq.update_layout(**{**_CHART, "height": 360}, xaxis_title="", yaxis_title="USDT",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+    st.plotly_chart(fig_eq, use_container_width=True)
 
-fig_eq.add_hline(y=0, line_dash="dash", line_color="#4a4a6a", line_width=1)
-fig_eq.update_layout(
-    **{**_CHART, "height": 380}, xaxis_title="", yaxis_title="USDT",
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-)
-st.plotly_chart(fig_eq, use_container_width=True)
+# ── 수익률 그래프 ────────────────────────────────
+with eq_col2:
+    st.markdown("**수익률 (ROI %)**")
+    fig_roi = go.Figure()
+    fig_roi.add_trace(go.Scatter(
+        x=ds["datetime"], y=ds["roi_pct"], mode="lines",
+        name="통합" if multi_ex else "ROI",
+        line=dict(color=_C["secondary"], width=2.5),
+        fill="tozeroy",
+        fillcolor="rgba(167,139,250,0.08)",
+    ))
+    if multi_ex:
+        for en, grp in df.groupby("exchange"):
+            g = grp.sort_values("datetime").copy()
+            eb = _ex_bal.get(en, init_bal)
+            g["roi_pct"] = g["net_pnl"].cumsum() / eb * 100
+            fig_roi.add_trace(go.Scatter(
+                x=g["datetime"], y=g["roi_pct"], mode="lines", name=en,
+                line=dict(color=_EX_COLOR.get(en, "#888"), width=1.5, dash="dot"),
+            ))
+    fig_roi.add_hline(y=0, line_dash="dash", line_color="#4a4a6a", line_width=1)
+    fig_roi.update_layout(**{**_CHART, "height": 360}, xaxis_title="", yaxis_title="%",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+    st.plotly_chart(fig_roi, use_container_width=True)
 
 
 # ══════════════════════════════════════════════════
@@ -564,15 +606,18 @@ st.markdown('<div class="section-hdr">개별 거래 PnL 분포</div>', unsafe_al
 render_ai("pnl_distribution")
 
 fig_hist = go.Figure()
-# 전체 범위에서 동일한 bin 크기 사용
+# 0을 경계로 bin을 나눠서 수익/손실 겹침 방지
 _all_pnl = df["net_pnl"]
-_bin_size = max((_all_pnl.max() - _all_pnl.min()) / 40, 1)
-_bins = dict(start=float(_all_pnl.min()), end=float(_all_pnl.max()), size=_bin_size)
-fig_hist.add_trace(go.Histogram(x=df[df["net_pnl"] < 0]["net_pnl"], name="손실", marker_color=_C["loss"], opacity=0.5, xbins=_bins))
-fig_hist.add_trace(go.Histogram(x=df[df["net_pnl"] >= 0]["net_pnl"], name="수익", marker_color=_C["profit"], opacity=0.8, xbins=_bins))
+_bin_size = max((float(_all_pnl.max()) - float(_all_pnl.min())) / 40, 1)
+# 손실: min ~ 0 범위, 수익: 0 ~ max 범위
+_loss_bins = dict(start=float(_all_pnl.min()), end=0, size=_bin_size)
+_win_bins = dict(start=0, end=float(_all_pnl.max()) + _bin_size, size=_bin_size)
+fig_hist.add_trace(go.Histogram(x=df[df["net_pnl"] < 0]["net_pnl"], name="손실", marker_color=_C["loss"], opacity=0.7, xbins=_loss_bins))
+fig_hist.add_trace(go.Histogram(x=df[df["net_pnl"] >= 0]["net_pnl"], name="수익", marker_color=_C["profit"], opacity=0.7, xbins=_win_bins))
 fig_hist.update_layout(
     **_CHART, barmode="overlay", xaxis_title="PnL (USDT)", yaxis_title="빈도",
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+    bargap=0.05,
 )
 st.plotly_chart(fig_hist, use_container_width=True)
 
