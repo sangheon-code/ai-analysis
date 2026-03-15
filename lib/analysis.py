@@ -30,13 +30,13 @@ def aggregate_data(trades: pd.DataFrame, deposits: pd.DataFrame,
     gross_loss = abs(float(losses["pnl_usdt"].sum())) if len(losses) > 0 else 1
     profit_factor = round(gross_profit / gross_loss, 2) if gross_loss > 0 else 0
 
-    # 최대 드로다운
-    cumulative = df.sort_values("datetime")["net_pnl"].cumsum()
-    running_max = cumulative.cummax()
-    max_dd = round(float((cumulative - running_max).min()), 2)
-
+    # 최대 드로다운 (최고 자산 대비 하락률)
     initial_balance = float(deposits["amount_usdt"].sum()) if not deposits.empty else 10_000
-    max_dd_pct = round(abs(max_dd) / initial_balance, 3) if initial_balance > 0 else 0
+    equity = initial_balance + df.sort_values("datetime")["net_pnl"].cumsum()
+    peak = equity.cummax()
+    drawdown = equity - peak
+    max_dd = round(float(drawdown.min()), 2)  # 최대 드로다운 금액 (음수)
+    max_dd_pct = round(abs(max_dd) / float(peak[drawdown.idxmin()]), 3) if float(peak[drawdown.idxmin()]) > 0 else 0
 
     # 종목별
     per_symbol = []
@@ -138,31 +138,34 @@ def aggregate_data(trades: pd.DataFrame, deposits: pd.DataFrame,
 # ─────────────────────────────────────────────────
 # 섹션별 인라인 AI 코멘트
 # ─────────────────────────────────────────────────
-SECTION_PROMPT = """당신은 KNOAH 플랫폼의 트레이딩 분석 AI입니다.
-유저의 거래 데이터를 보고, 대시보드의 각 섹션에 표시할 짧은 인사이트 코멘트를 작성합니다.
+SECTION_PROMPT = """당신은 10년 경력의 퀀트 트레이더 겸 트레이딩 코치입니다.
+유저의 실제 선물 거래 데이터를 분석하여, 대시보드의 각 섹션에 표시할 인사이트를 작성합니다.
 
-반드시 아래 JSON 형식으로만 응답하세요. 다른 텍스트 없이 JSON만 출력하세요.
+## 분석 원칙
+1. 반드시 데이터의 **구체적 수치**를 인용 (종목명, 금액, %, 횟수 등)
+2. "좋다/나쁘다" 같은 모호한 표현 금지 — **왜** 문제인지, **어떤 수치가** 근거인지 명시
+3. 손익비(RR ratio), 수익 팩터, 드로다운, 승률 간의 **관계**를 분석
+4. 거래 빈도 + 레버리지 + 스탑로스 설정률의 **조합**으로 리스크를 진단
+5. "$" 기호 대신 "USD" 사용
+
+## 출력 형식
+반드시 아래 JSON만 출력하세요. 다른 텍스트 없이 순수 JSON만.
 
 {
-  "overview": "핵심 지표 전체를 한줄로 진단 (예: 승률은 양호하나 수수료가 수익의 40%를 잠식 중)",
-  "exchange_comparison": "거래소간 비교 코멘트 (거래소가 1개면 해당 거래소 특징)",
-  "equity_curve": "누적 손익 곡선의 흐름을 한줄로 진단 (예: 중반 드로다운 후 회복세, 하락 추세 등)",
-  "symbol_pnl": "종목별 손익 패턴 한줄 진단 (예: BTC에서 수익을 내지만 알트에서 반납)",
-  "symbol_winrate": "종목별 승률 패턴 한줄 진단 (예: DOGE 승률 20%인데 계속 거래 중 → 손절 기준 필요)",
-  "weekday_pnl": "요일별 패턴 한줄 진단 (예: 주말 거래에서 집중적 손실 발생)",
-  "hourly_pattern": "시간대별 패턴 한줄 진단 (예: 새벽 거래 수익률 낮음, 오후에 집중하는 것이 유리)",
-  "pnl_distribution": "PnL 분포 한줄 진단 (예: 소액 수익을 자주 내지만 대규모 손실이 전체를 압도)",
-  "action_items": ["바로 실행 가능한 행동 제안 1", "제안 2", "제안 3"]
+  "overview": "전체 매매 스타일을 한 문장으로 진단. 반드시 핵심 수치 2개 이상 포함",
+  "exchange_comparison": "거래소별 성과 비교 또는 단일 거래소 특징. 레버리지/승률/손익 수치 포함",
+  "equity_curve": "자산 곡선 흐름 진단. 드로다운 구간, 회복 패턴, 추세 방향 구체적 언급",
+  "symbol_pnl": "어떤 종목에서 수익이 나고 어떤 종목에서 까먹는지 종목명+금액으로 콕 집기",
+  "symbol_winrate": "승률이 특히 낮거나 높은 종목을 지목하고, 거래 횟수 대비 효율성 진단",
+  "weekday_pnl": "어떤 요일에 수익/손실이 집중되는지 구체적 요일+금액 언급",
+  "hourly_pattern": "수익이 나는 시간대 vs 손실이 나는 시간대 구체적 비교",
+  "pnl_distribution": "평균 수익 vs 평균 손실 금액 비교, 꼬리 리스크(큰 손실) 언급",
+  "action_items": [
+    "가장 임팩트 큰 개선 행동 (수치 근거 포함)",
+    "두번째 행동 (수치 근거 포함)",
+    "세번째 행동 (수치 근거 포함)"
+  ]
 }
-
-## 규칙
-- 한국어로 작성
-- 각 코멘트는 반드시 1줄 (최대 60자)
-- action_items는 2~3개, 각각 구체적이고 실행 가능한 행동
-- 수치를 인용하여 구체적으로 작성
-- "$" 기호 대신 "USD" 사용
-- 부드러운 제안 톤
-- 투자 조언이 아닌 매매 습관 진단
 """
 
 
@@ -195,43 +198,114 @@ def call_claude_sections(aggregated: dict, api_key: str) -> dict:
 
 
 def generate_dummy_comments(aggregated: dict) -> dict:
-    """API 키 없을 때 더미 섹션별 코멘트 생성"""
+    """API 키 없을 때 데이터 기반 더미 섹션별 코멘트 생성"""
     s = aggregated["summary"]
     b = aggregated["behavior"]
     symbols = aggregated["per_symbol"]
+    tp = aggregated.get("time_pattern", {})
+    wpnl = tp.get("weekday_pnl", {})
 
-    # 최악/최고 종목
-    worst = symbols[0] if symbols else {"symbol": "N/A", "pnl_usdt": 0}
-    best = symbols[-1] if symbols else {"symbol": "N/A", "pnl_usdt": 0}
+    # 종목 정렬 (pnl 기준 오름차순 — [0]이 최악)
+    worst = symbols[0] if symbols else {"symbol": "?", "pnl_usdt": 0, "win_rate": 0, "trades": 0}
+    best = symbols[-1] if symbols else {"symbol": "?", "pnl_usdt": 0, "win_rate": 0, "trades": 0}
 
-    # 승률 기반 진단
-    if s["win_rate"] < 0.4:
-        ov = f"승률 {s['win_rate']*100:.0f}%로 낮은 편 — 손절 기준과 진입 타이밍 재점검 필요"
-    elif s["total_pnl_usdt"] < 0:
-        ov = f"승률 {s['win_rate']*100:.0f}%는 양호하지만, 평균 손실이 평균 수익보다 커서 순손실 구조"
+    # 손익비 계산
+    avg_win = abs(s["avg_win_usdt"]) if s["avg_win_usdt"] else 1
+    avg_loss = abs(s["avg_loss_usdt"]) if s["avg_loss_usdt"] else 1
+    rr_ratio = round(avg_win / avg_loss, 2) if avg_loss > 0 else 0
+    fee_pct = round(s["total_fee_usdt"] / max(abs(s["total_pnl_usdt"] + s["total_fee_usdt"]), 1) * 100, 0)
+
+    # ── overview ─────────────────────────────────
+    if s["win_rate"] < 0.4 and s["total_pnl_usdt"] < 0:
+        ov = (f"승률 {s['win_rate']*100:.0f}%, 손익비 1:{rr_ratio} — "
+              f"{s['total_trades']}건 중 {int(s['total_trades']*(1-s['win_rate']))}건이 손실, 진입 기준 재점검 필요")
+    elif s["profit_factor"] < 1:
+        ov = (f"수익팩터 {s['profit_factor']}(1 미만=순손실) — "
+              f"평균 수익 {avg_win:,.0f} USD vs 평균 손실 {avg_loss:,.0f} USD, 손절 늦는 패턴")
+    elif fee_pct > 30:
+        ov = (f"승률 {s['win_rate']*100:.0f}%로 양호하지만 수수료가 총수익의 {fee_pct:.0f}%를 잠식 중 — "
+              f"레버리지 {s['avg_leverage']}x 낮추면 수수료 절감 가능")
     else:
-        ov = f"수익 팩터 {s['profit_factor']}로 안정적이나, 수수료 {s['total_fee_usdt']:,.0f} USD가 수익을 깎는 중"
+        ov = (f"수익팩터 {s['profit_factor']}, 승률 {s['win_rate']*100:.0f}% — "
+              f"MDD {s['max_drawdown_pct']*100:.1f}% 관리하면서 수익 구조 유지 중")
 
-    # 누적 PnL 방향
-    if s["total_pnl_usdt"] < -500:
-        eq = f"전체 기간 하락 추세 — 최대 드로다운 {s['max_drawdown_pct']*100:.0f}% 기록"
+    # ── equity_curve ─────────────────────────────
+    dd_pct = s["max_drawdown_pct"] * 100
+    dd_usd = abs(s["max_drawdown_usdt"])
+    final = s["final_balance_usdt"]
+    initial = s["initial_balance_usdt"]
+    if s["total_pnl_usdt"] < -initial * 0.1:
+        eq = f"자산이 {initial:,.0f} → {final:,.0f} USD로 감소, MDD -{dd_pct:.1f}%({dd_usd:,.0f} USD) — 하락 추세"
     elif s["total_pnl_usdt"] < 0:
-        eq = f"등락 반복 후 소폭 손실 마감 — 드로다운 구간에서 회복력 부족"
+        eq = f"등락 반복 후 {abs(s['total_pnl_usdt']):,.0f} USD 소폭 손실 마감, MDD -{dd_pct:.1f}% 구간에서 회복 부족"
     else:
-        eq = f"전반적 우상향 추세 — 다만 드로다운 {s['max_drawdown_pct']*100:.0f}% 구간 주의"
+        eq = f"{initial:,.0f} → {final:,.0f} USD(+{s['total_pnl_usdt']:,.0f}), MDD -{dd_pct:.1f}% 거쳐 회복"
+
+    # ── exchange_comparison ──────────────────────
+    exc = (f"평균 레버리지 {s['avg_leverage']}x(최대 {s['max_leverage_used']}x), "
+           f"스탑로스 설정률 {b['stoploss_usage_ratio']*100:.0f}% — "
+           f"{'고위험 세팅' if s['avg_leverage'] > 15 else '중위험 세팅' if s['avg_leverage'] > 8 else '보수적 세팅'}")
+
+    # ── symbol_pnl ───────────────────────────────
+    sym_pnl = (f"{best['symbol']} +{best['pnl_usdt']:,.0f} USD({best['trades']}건) vs "
+               f"{worst['symbol']} {worst['pnl_usdt']:,.0f} USD({worst['trades']}건) — "
+               f"{'알트코인 손실이 BTC 수익을 상쇄' if worst['pnl_usdt'] < -best['pnl_usdt'] else '수익 종목이 손실을 커버 중'}")
+
+    # ── symbol_winrate ───────────────────────────
+    low_wr = [s for s in symbols if s["win_rate"] < 0.35 and s["trades"] >= 5]
+    if low_wr:
+        lw = low_wr[0]
+        sym_wr = f"{lw['symbol']} 승률 {lw['win_rate']*100:.0f}%인데 {lw['trades']}회 거래 — 해당 종목 거래 비중 줄이거나 전략 변경"
+    else:
+        sym_wr = f"전체 종목 승률 편차가 크지 않으나, {worst['symbol']}의 손익비가 가장 불리"
+
+    # ── weekday_pnl ──────────────────────────────
+    if wpnl:
+        worst_day = min(wpnl, key=wpnl.get)
+        best_day = max(wpnl, key=wpnl.get)
+        wd = f"{worst_day} {wpnl[worst_day]:,.0f} USD(최악) vs {best_day} +{wpnl[best_day]:,.0f} USD(최고) — {worst_day} 거래 축소 검토"
+    else:
+        wd = "요일별 데이터 부족"
+
+    # ── hourly_pattern ───────────────────────────
+    active_hrs = tp.get("most_active_hours_utc", [])
+    if active_hrs:
+        hr = f"거래 집중 시간 {active_hrs[0]}~{active_hrs[-1]}시(UTC) — 해당 시간대 외 거래는 충동매매 가능성 체크"
+    else:
+        hr = "시간대 데이터 부족"
+
+    # ── pnl_distribution ─────────────────────────
+    if rr_ratio < 1:
+        dist = f"평균 수익 {avg_win:,.0f} < 평균 손실 {avg_loss:,.0f} USD(손익비 {rr_ratio}) — 손실이 수익보다 커서 승률로 커버 불가"
+    else:
+        dist = f"평균 수익 {avg_win:,.0f} > 평균 손실 {avg_loss:,.0f} USD(손익비 {rr_ratio}) — 큰 손실 건만 관리하면 수익 구조 유지"
+
+    # ── action_items ─────────────────────────────
+    actions = []
+    if s["avg_leverage"] > 10:
+        actions.append(f"레버리지 평균 {s['avg_leverage']}x → 10x 이하로 제한 시 MDD {dd_pct:.0f}% 절반 이상 감소 기대")
+    if b["stoploss_usage_ratio"] < 0.5:
+        actions.append(f"스탑로스 설정률 {b['stoploss_usage_ratio']*100:.0f}% → 모든 포지션에 -2~3% SL 필수 적용")
+    if b["revenge_trade_count"] > 3:
+        actions.append(f"복수매매 {b['revenge_trade_count']}회 감지 — 연속 2회 손실 시 30분 강제 휴식 규칙 적용")
+    if low_wr:
+        lw = low_wr[0]
+        actions.append(f"{lw['symbol']} 승률 {lw['win_rate']*100:.0f}% — 해당 종목 한달간 거래 중단 후 재평가")
+    if b["max_trades_in_day"] > 15:
+        actions.append(f"일 최대 {b['max_trades_in_day']}건 과매매 — 하루 8건 상한 설정")
+    if len(actions) < 2:
+        actions.append("매매 일지 작성 시작 — 진입 근거와 감정 상태 기록으로 패턴 파악")
+    actions = actions[:3]
 
     return {
         "overview": ov,
-        "exchange_comparison": f"평균 레버리지 {s['avg_leverage']}x, 최대 {s['max_leverage_used']}x — 리스크 관리 점검 필요",
+        "exchange_comparison": exc,
         "equity_curve": eq,
-        "symbol_pnl": f"{best['symbol']}에서 +{best['pnl_usdt']:,.0f} USD 수익, {worst['symbol']}에서 {worst['pnl_usdt']:,.0f} USD 손실 집중",
-        "symbol_winrate": f"{worst['symbol']} 승률이 낮은데 거래 비중이 높음 — 해당 종목 거래 축소 검토",
-        "weekday_pnl": "주말 거래 손실 비중이 높다면 평일 집중 전략이 유리할 수 있음",
-        "hourly_pattern": f"주요 거래 시간대에 손익이 집중 — 컨디션 좋은 시간대로 거래 한정 추천",
-        "pnl_distribution": f"평균 수익 {s['avg_win_usdt']:,.0f} USD vs 평균 손실 {s['avg_loss_usdt']:,.0f} USD — 손익비 개선 여지",
-        "action_items": [
-            f"레버리지를 {min(10, s['max_leverage_used'])}x 이하로 제한해보기",
-            f"스탑로스 설정률 {b['stoploss_usage_ratio']*100:.0f}% → 100%로 올리기",
-            f"복수매매 {b['revenge_trade_count']}회 발생 — 손실 후 30분 쿨다운 규칙 적용",
+        "symbol_pnl": sym_pnl,
+        "symbol_winrate": sym_wr,
+        "weekday_pnl": wd,
+        "hourly_pattern": hr,
+        "pnl_distribution": dist,
+        "action_items": actions,
         ],
     }
