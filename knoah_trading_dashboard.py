@@ -564,9 +564,12 @@ st.markdown('<div class="section-hdr">개별 거래 PnL 분포</div>', unsafe_al
 render_ai("pnl_distribution")
 
 fig_hist = go.Figure()
-# 손실을 먼저 그려서 뒤에 배치, 수익을 위에 표시
-fig_hist.add_trace(go.Histogram(x=df[df["net_pnl"] < 0]["net_pnl"], name="손실", marker_color=_C["loss"], opacity=0.5, nbinsx=30))
-fig_hist.add_trace(go.Histogram(x=df[df["net_pnl"] >= 0]["net_pnl"], name="수익", marker_color=_C["profit"], opacity=0.8, nbinsx=30))
+# 전체 범위에서 동일한 bin 크기 사용
+_all_pnl = df["net_pnl"]
+_bin_size = max((_all_pnl.max() - _all_pnl.min()) / 40, 1)
+_bins = dict(start=float(_all_pnl.min()), end=float(_all_pnl.max()), size=_bin_size)
+fig_hist.add_trace(go.Histogram(x=df[df["net_pnl"] < 0]["net_pnl"], name="손실", marker_color=_C["loss"], opacity=0.5, xbins=_bins))
+fig_hist.add_trace(go.Histogram(x=df[df["net_pnl"] >= 0]["net_pnl"], name="수익", marker_color=_C["profit"], opacity=0.8, xbins=_bins))
 fig_hist.update_layout(
     **_CHART, barmode="overlay", xaxis_title="PnL (USDT)", yaxis_title="빈도",
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
