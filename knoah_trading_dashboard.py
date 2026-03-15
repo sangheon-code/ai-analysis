@@ -443,8 +443,8 @@ render_ai("equity_curve")
 
 ds = df.sort_values("datetime").copy()
 ds["cum_pnl"] = ds["net_pnl"].cumsum()
-ds["equity"] = init_bal + ds["cum_pnl"]
-ds["roi_pct"] = ds["cum_pnl"] / init_bal * 100
+ds["equity"] = (init_bal + ds["cum_pnl"]).clip(lower=0)  # 잔고 0 이하 방지
+ds["roi_pct"] = ((ds["equity"] / init_bal) - 1) * 100    # 0 기준 → -100% 하한
 multi_ex = "exchange" in df.columns and df["exchange"].nunique() > 1
 
 # 거래소별 초기 잔고 매핑
@@ -469,7 +469,7 @@ with eq_col1:
         for en, grp in df.groupby("exchange"):
             g = grp.sort_values("datetime").copy()
             eb = _ex_bal.get(en, init_bal)
-            g["equity"] = eb + g["net_pnl"].cumsum()
+            g["equity"] = (eb + g["net_pnl"].cumsum()).clip(lower=0)
             fig_eq.add_trace(go.Scatter(
                 x=g["datetime"], y=g["equity"], mode="lines", name=en,
                 line=dict(color=_EX_COLOR.get(en, "#888"), width=1.5, dash="dot"),
@@ -510,7 +510,7 @@ with eq_col2:
         for en, grp in df.groupby("exchange"):
             g = grp.sort_values("datetime").copy()
             eb = _ex_bal.get(en, init_bal)
-            g["roi_pct"] = g["net_pnl"].cumsum() / eb * 100
+            g["roi_pct"] = (((eb + g["net_pnl"].cumsum()).clip(lower=0) / eb) - 1) * 100
             fig_roi.add_trace(go.Scatter(
                 x=g["datetime"], y=g["roi_pct"], mode="lines", name=en,
                 line=dict(color=_EX_COLOR.get(en, "#888"), width=1.5, dash="dot"),
@@ -606,18 +606,30 @@ st.markdown('<div class="section-hdr">개별 거래 PnL 분포</div>', unsafe_al
 render_ai("pnl_distribution")
 
 fig_hist = go.Figure()
-# 0을 경계로 bin을 나눠서 수익/손실 겹침 방지
-_all_pnl = df["net_pnl"]
-_bin_size = max((float(_all_pnl.max()) - float(_all_pnl.min())) / 40, 1)
-# 손실: min ~ 0 범위, 수익: 0 ~ max 범위
-_loss_bins = dict(start=float(_all_pnl.min()), end=0, size=_bin_size)
-_win_bins = dict(start=0, end=float(_all_pnl.max()) + _bin_size, size=_bin_size)
-fig_hist.add_trace(go.Histogram(x=df[df["net_pnl"] < 0]["net_pnl"], name="손실", marker_color=_C["loss"], opacity=0.7, xbins=_loss_bins))
-fig_hist.add_trace(go.Histogram(x=df[df["net_pnl"] >= 0]["net_pnl"], name="수익", marker_color=_C["profit"], opacity=0.7, xbins=_win_bins))
+# 단일 히스토그램 + 색상으로 수익/손실 구분 (겹침 원천 차단)
+import numpy as _np
+_pnl = df["net_pnl"].values
+_bin_size = max((float(_pnl.max()) - float(_pnl.min())) / 40, 1)
+# 0을 경계로 bin edges 생성
+_neg_edges = list(_np.arange(0, float(_pnl.min()) - _bin_size, -_bin_size))[::-1]
+_pos_edges = list(_np.arange(0, float(_pnl.max()) + _bin_size, _bin_size))
+_edges = sorted(set(_neg_edges + _pos_edges))
+# 각 bin의 카운트와 색상 계산
+_colors, _counts, _mids = [], [], []
+for j in range(len(_edges) - 1):
+    lo, hi = _edges[j], _edges[j + 1]
+    mid = (lo + hi) / 2
+    cnt = int(((df["net_pnl"] >= lo) & (df["net_pnl"] < hi)).sum())
+    _mids.append(mid)
+    _counts.append(cnt)
+    _colors.append(_C["profit"] if mid >= 0 else _C["loss"])
+fig_hist.add_trace(go.Bar(
+    x=_mids, y=_counts, width=_bin_size * 0.9,
+    marker_color=_colors, showlegend=False,
+    hovertemplate="PnL: %{x:,.0f}<br>빈도: %{y}<extra></extra>",
+))
 fig_hist.update_layout(
-    **_CHART, barmode="overlay", xaxis_title="PnL (USDT)", yaxis_title="빈도",
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-    bargap=0.05,
+    **_CHART, xaxis_title="PnL (USDT)", yaxis_title="빈도", bargap=0.05,
 )
 st.plotly_chart(fig_hist, use_container_width=True)
 
