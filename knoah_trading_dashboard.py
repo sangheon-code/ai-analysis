@@ -441,10 +441,6 @@ elif "exchange" in df.columns:
 st.markdown('<div class="section-hdr">자산 곡선</div>', unsafe_allow_html=True)
 render_ai("equity_curve")
 
-ds = df.sort_values("datetime").copy()
-ds["cum_pnl"] = ds["net_pnl"].cumsum()
-ds["equity"] = (init_bal + ds["cum_pnl"]).clip(lower=0)  # 잔고 0 이하 방지
-ds["roi_pct"] = ((ds["equity"] / init_bal) - 1) * 100    # 0 기준 → -100% 하한
 multi_ex = "exchange" in df.columns and df["exchange"].nunique() > 1
 
 # 거래소별 초기 잔고 매핑
@@ -452,6 +448,39 @@ _dep = st.session_state.deposits
 _ex_bal = {}
 if not _dep.empty and "exchange" in _dep.columns:
     _ex_bal = _dep.groupby("exchange")["amount_usdt"].sum().to_dict()
+
+# ── 거래소별 equity를 각각 계산 후 합산 (잔고 0 바닥 개별 적용) ──
+# 각 거래소는 독립 계좌 → 잔고가 0이면 해당 거래소에서 거래 불가
+# 통합 equity = sum(거래소별 equity)
+if multi_ex:
+    _ex_equity_frames = []
+    for en, grp in df.groupby("exchange"):
+        g = grp.sort_values("datetime").copy()
+        eb = _ex_bal.get(en, 10_000)
+        g["ex_equity"] = (eb + g["net_pnl"].cumsum()).clip(lower=0)
+        g["ex_roi"] = ((g["ex_equity"] / eb) - 1) * 100
+        g["_ex_bal"] = eb
+        _ex_equity_frames.append(g[["datetime", "exchange", "net_pnl", "symbol", "side", "ex_equity", "ex_roi", "_ex_bal"]])
+    _all_eq = pd.concat(_ex_equity_frames).sort_values("datetime")
+    # 통합: 시점별 거래소 equity 합산
+    ds = _all_eq.copy()
+    # 각 거래소의 마지막 equity를 forward-fill해서 시점별 합산
+    _pivot = _all_eq.pivot_table(index="datetime", columns="exchange", values="ex_equity", aggfunc="last")
+    _pivot = _pivot.ffill().fillna(method="bfill")
+    _pivot["total"] = _pivot.sum(axis=1)
+    _total_init = sum(_ex_bal.get(en, 10_000) for en in df["exchange"].unique())
+    _pivot["total_roi"] = ((_pivot["total"] / _total_init) - 1) * 100
+    # ds에 통합 equity/roi 매핑
+    ds = ds.merge(_pivot[["total", "total_roi"]].reset_index(), on="datetime", how="left")
+    ds["equity"] = ds["total"]
+    ds["roi_pct"] = ds["total_roi"]
+else:
+    ds = df.sort_values("datetime").copy()
+    eb = list(_ex_bal.values())[0] if _ex_bal else init_bal
+    ds["equity"] = (eb + ds["net_pnl"].cumsum()).clip(lower=0)
+    ds["roi_pct"] = ((ds["equity"] / eb) - 1) * 100
+    ds["ex_equity"] = ds["equity"]
+    _total_init = eb
 
 eq_col1, eq_col2 = st.columns(2)
 
@@ -466,12 +495,9 @@ with eq_col1:
         fill="tozeroy", fillcolor="rgba(107,138,255,0.06)",
     ))
     if multi_ex:
-        for en, grp in df.groupby("exchange"):
-            g = grp.sort_values("datetime").copy()
-            eb = _ex_bal.get(en, init_bal)
-            g["equity"] = (eb + g["net_pnl"].cumsum()).clip(lower=0)
+        for en, grp in _all_eq.groupby("exchange"):
             fig_eq.add_trace(go.Scatter(
-                x=g["datetime"], y=g["equity"], mode="lines", name=en,
+                x=grp["datetime"], y=grp["ex_equity"], mode="lines", name=en,
                 line=dict(color=_EX_COLOR.get(en, "#888"), width=1.5, dash="dot"),
             ))
     # 거래 마커
@@ -489,7 +515,8 @@ with eq_col1:
         hovertemplate="%{customdata[0]} %{customdata[1]}<br>%{customdata[2]}<extra></extra>",
         customdata=list(zip(loss_ds["symbol"], loss_ds["side"], [f"${v:,.0f}" for v in loss_ds["net_pnl"]])),
     ))
-    fig_eq.add_hline(y=init_bal, line_dash="dash", line_color="#4a4a6a", line_width=1,
+    _ref_bal = _total_init if multi_ex else (list(_ex_bal.values())[0] if _ex_bal else init_bal)
+    fig_eq.add_hline(y=_ref_bal, line_dash="dash", line_color="#4a4a6a", line_width=1,
                      annotation_text="초기 잔고", annotation_font_color="#7b7b9e")
     fig_eq.update_layout(**{**_CHART, "height": 360}, xaxis_title="", yaxis_title="USDT",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
@@ -503,16 +530,12 @@ with eq_col2:
         x=ds["datetime"], y=ds["roi_pct"], mode="lines",
         name="통합" if multi_ex else "ROI",
         line=dict(color=_C["secondary"], width=2.5),
-        fill="tozeroy",
-        fillcolor="rgba(167,139,250,0.08)",
+        fill="tozeroy", fillcolor="rgba(167,139,250,0.08)",
     ))
     if multi_ex:
-        for en, grp in df.groupby("exchange"):
-            g = grp.sort_values("datetime").copy()
-            eb = _ex_bal.get(en, init_bal)
-            g["roi_pct"] = (((eb + g["net_pnl"].cumsum()).clip(lower=0) / eb) - 1) * 100
+        for en, grp in _all_eq.groupby("exchange"):
             fig_roi.add_trace(go.Scatter(
-                x=g["datetime"], y=g["roi_pct"], mode="lines", name=en,
+                x=grp["datetime"], y=grp["ex_roi"], mode="lines", name=en,
                 line=dict(color=_EX_COLOR.get(en, "#888"), width=1.5, dash="dot"),
             ))
     fig_roi.add_hline(y=0, line_dash="dash", line_color="#4a4a6a", line_width=1)
