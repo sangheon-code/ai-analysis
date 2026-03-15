@@ -1,0 +1,406 @@
+"""
+KNOAH 거래 분석 – 거래소 API 연동 (ccxt)
+=========================================
+Binance Futures, Bybit, OKX, Bitget USDT-M 선물 지원.
+"""
+
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
+from typing import Optional
+
+try:
+    import ccxt
+except ImportError:
+    ccxt = None  # UI에서 안내 메시지 표시
+
+
+# ─────────────────────────────────────────────────
+# 거래소 팩토리
+# ─────────────────────────────────────────────────
+_EXCHANGE_MAP = {
+    "Binance": "binance",
+    "Bybit": "bybit",
+    "OKX": "okx",
+    "Bitget": "bitget",
+}
+
+# OKX, Bitget은 passphrase 필요
+NEEDS_PASSPHRASE = {"OKX", "Bitget"}
+
+
+def create_exchange(name: str, api_key: str, api_secret: str,
+                    passphrase: Optional[str] = None):
+    """ccxt 거래소 인스턴스 생성 (USDT-M 선물 모드)"""
+    if ccxt is None:
+        raise ImportError("ccxt 패키지가 필요합니다: pip install ccxt")
+
+    ccxt_id = _EXCHANGE_MAP.get(name)
+    if not ccxt_id:
+        raise ValueError(f"지원하지 않는 거래소: {name}")
+
+    exchange_class = getattr(ccxt, ccxt_id)
+
+    config = {
+        "apiKey": api_key,
+        "secret": api_secret,
+        "enableRateLimit": True,
+        "options": {"defaultType": "swap"},  # USDT-M 선물
+    }
+
+    if passphrase and name in NEEDS_PASSPHRASE:
+        config["password"] = passphrase
+
+    # 거래소별 추가 설정
+    if name == "Binance":
+        config["options"]["defaultType"] = "future"
+    elif name == "Bybit":
+        config["options"]["defaultType"] = "swap"
+    elif name == "OKX":
+        config["options"]["defaultType"] = "swap"
+    elif name == "Bitget":
+        config["options"]["defaultType"] = "swap"
+        config["options"]["defaultSubType"] = "linear"
+
+    return exchange_class(config)
+
+
+# ─────────────────────────────────────────────────
+# 연결 테스트
+# ─────────────────────────────────────────────────
+def test_connection(exchange) -> dict:
+    """API 연결 + 잔고 확인"""
+    try:
+        balance = exchange.fetch_balance()
+        # USDT 잔고 추출
+        usdt = balance.get("USDT", {})
+        total = float(usdt.get("total", 0) or 0)
+        free = float(usdt.get("free", 0) or 0)
+        return {
+            "ok": True,
+            "total_usdt": round(total, 2),
+            "free_usdt": round(free, 2),
+            "msg": f"연결 성공 · 잔고: ${total:,.2f} USDT",
+        }
+    except ccxt.AuthenticationError:
+        return {"ok": False, "msg": "인증 실패: API Key / Secret을 확인해주세요."}
+    except ccxt.PermissionDenied:
+        return {"ok": False, "msg": "권한 부족: API 키에 선물 읽기 권한이 필요합니다."}
+    except ccxt.NetworkError as e:
+        return {"ok": False, "msg": f"네트워크 오류: {e}"}
+    except Exception as e:
+        return {"ok": False, "msg": f"연결 실패: {e}"}
+
+
+# ─────────────────────────────────────────────────
+# 거래 내역 가져오기
+# ─────────────────────────────────────────────────
+def fetch_trades(exchange, exchange_name: str,
+                 days: int = 30, symbols: list = None) -> pd.DataFrame:
+    """
+    거래소에서 선물 거래 내역을 가져와 통합 DataFrame으로 반환.
+    거래소별로 최적의 엔드포인트를 사용.
+    """
+    since_ms = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
+
+    if exchange_name == "Binance":
+        df = _fetch_binance(exchange, since_ms, symbols)
+    elif exchange_name == "Bybit":
+        df = _fetch_bybit(exchange, since_ms)
+    elif exchange_name == "OKX":
+        df = _fetch_okx(exchange)
+    elif exchange_name == "Bitget":
+        df = _fetch_bitget(exchange)
+    else:
+        raise ValueError(f"지원하지 않는 거래소: {exchange_name}")
+
+    if not df.empty:
+        df.insert(1, "exchange", exchange_name)
+    return df
+
+
+# ── Binance Futures ──────────────────────────────
+def _fetch_binance(exchange, since_ms: int, symbols: list = None) -> pd.DataFrame:
+    """
+    Binance USDT-M: /fapi/v1/userTrades + /fapi/v1/income (REALIZED_PNL)
+    """
+    rows = []
+
+    # 1) REALIZED_PNL income records
+    income_data = exchange.fapiPrivateGetIncome({
+        "incomeType": "REALIZED_PNL",
+        "startTime": since_ms,
+        "limit": 1000,
+    })
+
+    # 2) User trades for entry/exit details
+    trade_symbols = symbols or _get_active_symbols_binance(exchange, since_ms)
+
+    all_trades = []
+    for sym in trade_symbols:
+        try:
+            trades = exchange.fapiPrivateGetUserTrades({
+                "symbol": sym.replace("/", "").replace(":USDT", ""),
+                "startTime": since_ms,
+                "limit": 1000,
+            })
+            all_trades.extend(trades)
+        except Exception:
+            continue
+
+    # income으로 포지션별 PnL 집계
+    for inc in income_data:
+        symbol = inc.get("symbol", "")
+        pnl = float(inc.get("income", 0))
+        ts = int(inc.get("time", 0))
+
+        # 해당 심볼의 최근 거래에서 추가 정보 추출
+        sym_trades = [t for t in all_trades if t.get("symbol") == symbol]
+        recent = [t for t in sym_trades if abs(int(t.get("time", 0)) - ts) < 60000]
+
+        if recent:
+            last = recent[-1]
+            side = "LONG" if last.get("side") == "BUY" and not last.get("buyer") else "SHORT"
+            leverage = 1  # income에는 레버리지 정보 없음, 별도 조회 필요
+            qty = sum(float(t.get("quoteQty", 0)) for t in recent)
+            fee = sum(float(t.get("commission", 0)) for t in recent)
+            price = float(last.get("price", 0))
+        else:
+            side = "LONG" if pnl > 0 else "SHORT"
+            leverage = 1
+            qty = abs(pnl) * 10
+            fee = qty * 0.0004
+            price = 0
+
+        rows.append({
+            "datetime": datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d %H:%M"),
+            "symbol": symbol,
+            "side": side,
+            "leverage": leverage,
+            "entry_price": round(price, 4),
+            "exit_price": 0,
+            "quantity_usdt": round(abs(qty), 2),
+            "pnl_usdt": round(pnl, 2),
+            "fee_usdt": round(abs(fee), 2),
+            "holding_minutes": 0,
+            "order_type": "MARKET",
+            "stoploss_set": False,
+        })
+
+    return _to_dataframe(rows)
+
+
+def _get_active_symbols_binance(exchange, since_ms: int) -> list:
+    """최근 거래가 있는 심볼 목록 조회"""
+    try:
+        income = exchange.fapiPrivateGetIncome({
+            "incomeType": "REALIZED_PNL",
+            "startTime": since_ms,
+            "limit": 1000,
+        })
+        return list(set(i.get("symbol", "") for i in income if i.get("symbol")))
+    except Exception:
+        return ["BTCUSDT", "ETHUSDT"]
+
+
+# ── Bybit ────────────────────────────────────────
+def _fetch_bybit(exchange, since_ms: int) -> pd.DataFrame:
+    """
+    Bybit V5: /v5/position/closed-pnl — 포지션 단위 PnL 직접 제공
+    """
+    rows = []
+    cursor = ""
+
+    for _ in range(10):  # 최대 10페이지
+        params = {"category": "linear", "limit": 200}
+        if cursor:
+            params["cursor"] = cursor
+
+        resp = exchange.privateGetV5PositionClosedPnl(params)
+        result = resp.get("result", {})
+        items = result.get("list", [])
+
+        if not items:
+            break
+
+        for item in items:
+            ts = int(item.get("updatedTime", item.get("createdTime", 0)))
+            if ts < since_ms:
+                continue
+
+            symbol = item.get("symbol", "")
+            side = item.get("side", "Buy")
+            side = "LONG" if side == "Buy" else "SHORT"
+
+            rows.append({
+                "datetime": datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d %H:%M"),
+                "symbol": symbol,
+                "side": side,
+                "leverage": int(float(item.get("leverage", 1))),
+                "entry_price": round(float(item.get("avgEntryPrice", 0)), 4),
+                "exit_price": round(float(item.get("avgExitPrice", 0)), 4),
+                "quantity_usdt": round(float(item.get("cumEntryValue", 0)), 2),
+                "pnl_usdt": round(float(item.get("closedPnl", 0)), 2),
+                "fee_usdt": 0,
+                "holding_minutes": 0,
+                "order_type": item.get("orderType", "Market").upper(),
+                "stoploss_set": False,
+            })
+
+        cursor = result.get("nextPageCursor", "")
+        if not cursor:
+            break
+
+    return _to_dataframe(rows)
+
+
+# ── OKX ──────────────────────────────────────────
+def _fetch_okx(exchange) -> pd.DataFrame:
+    """
+    OKX: /api/v5/account/positions-history — 종료된 포지션 이력
+    """
+    rows = []
+
+    for _ in range(5):  # 페이지네이션
+        params = {"instType": "SWAP", "limit": "100"}
+
+        resp = exchange.privateGetApiV5AccountPositionsHistory(params)
+        data = resp.get("data", [])
+
+        if not data:
+            break
+
+        for pos in data:
+            inst_id = pos.get("instId", "")
+            # OKX instId: BTC-USDT-SWAP → BTCUSDT
+            symbol = inst_id.replace("-SWAP", "").replace("-", "")
+
+            direction = pos.get("direction", "")
+            side = "LONG" if direction == "long" else "SHORT"
+
+            ts = int(pos.get("uTime", pos.get("cTime", 0)))
+
+            rows.append({
+                "datetime": datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d %H:%M"),
+                "symbol": symbol,
+                "side": side,
+                "leverage": int(float(pos.get("lever", 1))),
+                "entry_price": round(float(pos.get("openAvgPx", 0)), 4),
+                "exit_price": round(float(pos.get("closeAvgPx", 0)), 4),
+                "quantity_usdt": round(float(pos.get("openMaxPos", 0)) * float(pos.get("openAvgPx", 1)), 2),
+                "pnl_usdt": round(float(pos.get("pnl", 0)), 2),
+                "fee_usdt": round(abs(float(pos.get("fee", 0))) + abs(float(pos.get("fundingFee", 0))), 2),
+                "holding_minutes": 0,
+                "order_type": "MARKET",
+                "stoploss_set": False,
+            })
+
+        break  # OKX는 after 파라미터로 페이지네이션 (간소화)
+
+    return _to_dataframe(rows)
+
+
+# ── Bitget ───────────────────────────────────────
+def _fetch_bitget(exchange) -> pd.DataFrame:
+    """
+    Bitget: /api/v2/mix/position/history-position — 포지션 이력
+    """
+    rows = []
+
+    try:
+        resp = exchange.privateGetApiV2MixPositionHistoryPosition({
+            "productType": "USDT-FUTURES",
+            "limit": "200",
+        })
+        data = resp.get("data", {})
+        items = data.get("list", data) if isinstance(data, dict) else data
+        if not isinstance(items, list):
+            items = []
+
+    except Exception:
+        # fallback: fill history
+        try:
+            resp = exchange.privateGetApiV2MixOrderFillHistory({
+                "productType": "USDT-FUTURES",
+                "limit": "200",
+            })
+            items = resp.get("data", {}).get("fillList", [])
+        except Exception:
+            items = []
+
+    for item in items:
+        symbol = item.get("symbol", "")
+        # Bitget symbol: BTCUSDT → BTCUSDT or BTCUSDT_UMCBL → BTCUSDT
+        symbol = symbol.split("_")[0] if "_" in symbol else symbol
+
+        side = item.get("holdSide", item.get("side", "long"))
+        side = "LONG" if side.lower() in ("long", "buy") else "SHORT"
+
+        ts = int(item.get("uTime", item.get("cTime", 0)))
+
+        rows.append({
+            "datetime": datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d %H:%M") if ts else "",
+            "symbol": symbol,
+            "side": side,
+            "leverage": int(float(item.get("leverage", 1))),
+            "entry_price": round(float(item.get("openAvgPrice", item.get("openPriceAvg", 0))), 4),
+            "exit_price": round(float(item.get("closeAvgPrice", item.get("closePriceAvg", 0))), 4),
+            "quantity_usdt": round(abs(float(item.get("margin", 0))) * float(item.get("leverage", 1)), 2),
+            "pnl_usdt": round(float(item.get("achievedProfits", item.get("profit", 0))), 2),
+            "fee_usdt": round(abs(float(item.get("totalFee", item.get("fee", 0)))), 2),
+            "holding_minutes": 0,
+            "order_type": "MARKET",
+            "stoploss_set": False,
+        })
+
+    return _to_dataframe(rows)
+
+
+# ── 입출금 내역 ──────────────────────────────────
+def fetch_deposits_withdrawals(exchange, days: int = 90) -> pd.DataFrame:
+    """입출금 내역 조회"""
+    rows = []
+    since_ms = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
+
+    try:
+        deposits = exchange.fetch_deposits("USDT", since_ms, 100)
+        for dep in deposits:
+            rows.append({
+                "datetime": datetime.fromtimestamp(dep["timestamp"] / 1000).strftime("%Y-%m-%d %H:%M"),
+                "type": "DEPOSIT",
+                "amount_usdt": round(float(dep.get("amount", 0)), 2),
+            })
+    except Exception:
+        pass
+
+    try:
+        withdrawals = exchange.fetch_withdrawals("USDT", since_ms, 100)
+        for wd in withdrawals:
+            rows.append({
+                "datetime": datetime.fromtimestamp(wd["timestamp"] / 1000).strftime("%Y-%m-%d %H:%M"),
+                "type": "WITHDRAWAL",
+                "amount_usdt": round(float(wd.get("amount", 0)), 2),
+            })
+    except Exception:
+        pass
+
+    if not rows:
+        return pd.DataFrame(columns=["id", "datetime", "type", "amount_usdt"])
+
+    df = pd.DataFrame(rows)
+    df = df.sort_values("datetime").reset_index(drop=True)
+    df.insert(0, "id", range(len(df)))
+    return df
+
+
+# ── 유틸 ─────────────────────────────────────────
+def _to_dataframe(rows: list) -> pd.DataFrame:
+    """행 목록 → 정규화된 DataFrame"""
+    if not rows:
+        from .config import TRADE_COLUMNS
+        return pd.DataFrame(columns=TRADE_COLUMNS)
+
+    df = pd.DataFrame(rows)
+    df = df.sort_values("datetime").reset_index(drop=True)
+    df.insert(0, "id", range(len(df)))
+    return df
