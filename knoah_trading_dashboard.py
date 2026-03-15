@@ -385,13 +385,76 @@ if df.empty:
 df["datetime"] = pd.to_datetime(df["datetime"])
 df["net_pnl"] = df["pnl_usdt"] - df["fee_usdt"]
 
-total_pnl = float(df["net_pnl"].sum())
+# ── KNOAH 수익률 공식 ────────────────────────────
+# 순이익 = 현재자산 - 초기자산 - 총입금(초기제외) + 총출금
+# 수익률(%) = 순이익 ÷ (초기자산 + 총입금(초기제외)) × 100
+_dep_df = st.session_state.deposits
+_dep_all = _dep_df if not _dep_df.empty else pd.DataFrame(columns=["type", "amount_usdt", "exchange"])
+
+# 거래소별 초기 잔고 (첫 번째 DEPOSIT)
+_ex_bal = {}
+if not _dep_all.empty and "exchange" in _dep_all.columns:
+    for en, grp in _dep_all.groupby("exchange"):
+        deps = grp[grp["type"] == "DEPOSIT"]["amount_usdt"]
+        _ex_bal[en] = float(deps.iloc[0]) if len(deps) > 0 else 10_000
+init_bal_total = sum(_ex_bal.values()) if _ex_bal else 10_000  # 전체 초기 자산
+
+# 입출금 집계 (초기 입금 제외)
+_all_deposits = float(_dep_all[_dep_all["type"] == "DEPOSIT"]["amount_usdt"].sum()) if len(_dep_all) > 0 else 0
+_extra_deposits = _all_deposits - init_bal_total  # 초기 자산 이후 추가 입금
+_extra_deposits = max(_extra_deposits, 0)
+_total_withdrawals = float(_dep_all[_dep_all["type"] == "WITHDRAWAL"]["amount_usdt"].sum()) if len(_dep_all) > 0 else 0
+
+# 현재 자산 = 거래소별 (초기잔고 + 누적PnL).clip(0) 합산
+_current_bal = 0
+for en in (df["exchange"].unique() if "exchange" in df.columns else ["default"]):
+    eb = _ex_bal.get(en, 10_000)
+    if en == "default":
+        ex_pnl = float(df["net_pnl"].sum())
+    else:
+        ex_pnl = float(df[df["exchange"] == en]["net_pnl"].sum())
+    _current_bal += max(0, eb + ex_pnl)
+
+# KNOAH 공식 적용
+net_profit = _current_bal - init_bal_total - _extra_deposits + _total_withdrawals
+roi_denom = init_bal_total + _extra_deposits
+roi = (net_profit / roi_denom * 100) if roi_denom > 0 else 0
+
+total_pnl = net_profit
 win_count = len(df[df["pnl_usdt"] > 0])
 win_rate = win_count / len(df) * 100
 total_fee = float(df["fee_usdt"].sum())
 avg_lev = float(df["leverage"].mean())
-init_bal = float(st.session_state.deposits["amount_usdt"].sum()) if not st.session_state.deposits.empty else 10_000
-roi = total_pnl / init_bal * 100 if init_bal > 0 else 0
+
+
+# ══════════════════════════════════════════════════
+# HERO: 현재 잔고 + 수익률
+# ══════════════════════════════════════════════════
+_roi_color = _C["profit"] if roi >= 0 else _C["loss"]
+_pnl_sign = "+" if net_profit >= 0 else ""
+
+st.markdown(f"""
+<div style="display:flex; gap:24px; align-items:flex-end; margin:20px 0 28px 0;">
+  <div>
+    <div style="font-size:12px; color:#7b7b9e; text-transform:uppercase; letter-spacing:1px; margin-bottom:4px;">현재 잔고</div>
+    <div style="font-size:36px; font-family:JetBrains Mono; font-weight:700; color:#e8e8ed;">
+      ${_current_bal:,.2f}
+    </div>
+  </div>
+  <div>
+    <div style="font-size:12px; color:#7b7b9e; text-transform:uppercase; letter-spacing:1px; margin-bottom:4px;">수익률</div>
+    <div style="font-size:36px; font-family:JetBrains Mono; font-weight:700; color:{_roi_color};">
+      {roi:+.2f}%
+    </div>
+  </div>
+  <div style="padding-bottom:6px;">
+    <span style="font-size:14px; color:#7b7b9e;">순이익</span>
+    <span style="font-size:18px; font-family:JetBrains Mono; font-weight:600; color:{_roi_color}; margin-left:8px;">
+      {_pnl_sign}${net_profit:,.2f}
+    </span>
+  </div>
+</div>
+""", unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════════
@@ -400,13 +463,12 @@ roi = total_pnl / init_bal * 100 if init_bal > 0 else 0
 st.markdown('<div class="section-hdr">핵심 지표</div>', unsafe_allow_html=True)
 render_ai("overview")
 
-m1, m2, m3, m4, m5, m6 = st.columns(6)
+m1, m2, m3, m4, m5 = st.columns(5)
 m1.metric("총 거래", f"{len(df)}건")
-m2.metric("총 손익", f"${total_pnl:,.2f}", delta=f"{roi:+.1f}%")
-m3.metric("승률", f"{win_rate:.1f}%")
-m4.metric("평균 레버리지", f"{avg_lev:.1f}x")
-m5.metric("총 수수료", f"${total_fee:,.2f}")
-m6.metric("순 ROI", f"{roi:+.1f}%")
+m2.metric("승률", f"{win_rate:.1f}%")
+m3.metric("평균 레버리지", f"{avg_lev:.1f}x")
+m4.metric("총 수수료", f"${total_fee:,.2f}")
+m5.metric("초기 자산", f"${init_bal_total:,.0f}")
 
 
 # ── 거래소별 카드 ────────────────────────────────
@@ -476,7 +538,7 @@ if multi_ex:
     ds["roi_pct"] = ds["total_roi"]
 else:
     ds = df.sort_values("datetime").copy()
-    eb = list(_ex_bal.values())[0] if _ex_bal else init_bal
+    eb = list(_ex_bal.values())[0] if _ex_bal else init_bal_total
     ds["equity"] = (eb + ds["net_pnl"].cumsum()).clip(lower=0)
     ds["roi_pct"] = ((ds["equity"] / eb) - 1) * 100
     ds["ex_equity"] = ds["equity"]
@@ -515,7 +577,7 @@ with eq_col1:
         hovertemplate="%{customdata[0]} %{customdata[1]}<br>%{customdata[2]}<extra></extra>",
         customdata=list(zip(loss_ds["symbol"], loss_ds["side"], [f"${v:,.0f}" for v in loss_ds["net_pnl"]])),
     ))
-    _ref_bal = _total_init if multi_ex else (list(_ex_bal.values())[0] if _ex_bal else init_bal)
+    _ref_bal = _total_init if multi_ex else (list(_ex_bal.values())[0] if _ex_bal else init_bal_total)
     fig_eq.add_hline(y=_ref_bal, line_dash="dash", line_color="#4a4a6a", line_width=1,
                      annotation_text="초기 잔고", annotation_font_color="#7b7b9e")
     fig_eq.update_layout(**{**_CHART, "height": 360}, xaxis_title="", yaxis_title="USDT",
