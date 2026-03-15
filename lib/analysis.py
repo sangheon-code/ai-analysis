@@ -307,5 +307,4 @@ def generate_dummy_comments(aggregated: dict) -> dict:
         "hourly_pattern": hr,
         "pnl_distribution": dist,
         "action_items": actions,
-        ],
     }
