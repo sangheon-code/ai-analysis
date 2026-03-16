@@ -89,7 +89,7 @@ def aggregate_data(trades: pd.DataFrame, deposits: pd.DataFrame,
 
     return {
         "exchange": exchange,
-        "analysis_period": f"{df['datetime'].min().strftime('%Y-%m-%d')} ~ {df['datetime'].max().strftime('%Y-%m-%d')}",
+        "analysis_period": f"{df['datetime'].min().strftime('%Y-%m-%d')} - {df['datetime'].max().strftime('%Y-%m-%d')}",
         "account_type": "USDT-M Futures",
         "summary": {
             "total_trades": int(n), "total_pnl_usdt": total_pnl, "total_fee_usdt": total_fee,
@@ -287,6 +287,7 @@ def aggregate_deep_data(trades: pd.DataFrame, deposits: pd.DataFrame) -> dict:
 DEEP_REPORT_PROMPT = """당신은 트레이딩 코치입니다. 유저의 선물 거래 데이터를 분석합니다.
 
 ## 글쓰기 규칙 (제일 중요)
+- "~"(물결표) 사용 금지. 숫자 범위는 "-"(하이픈) 사용 (예: 3-5개, 10-20%)
 - 중학생도 이해할 수 있게 쉽게 쓰세요
 - 전문 용어 금지. "disposition effect" 같은 말 쓰지 마세요. "수익 나면 빨리 팔고, 손실 나면 안 팔고 버티는 습관" 이렇게 쓰세요
 - 짧은 문장. 한 문장에 한 가지만.
@@ -309,7 +310,7 @@ DEEP_REPORT_PROMPT = """당신은 트레이딩 코치입니다. 유저의 선물
 종목×방향, 종목×요일, 시간대 교차 데이터에서 의외의 패턴만 뽑으세요.
 - 차이가 진짜 클 때만 언급 (승률 2배 이상, 손익 5배 이상 등)
 - 비슷비슷한 건 "비슷합니다" 한마디로 끝내세요
-- 3~5개
+- 3-5개
 
 ### 매매 습관 진단
 복수매매, 연패 후 행동, 연승 후 행동 데이터를 쉬운 말로 풀어주세요.
