@@ -524,8 +524,9 @@ with tab_ai:
         st.caption(" · ".join(info_parts))
 
     if st.session_state.ai_deep_report:
-        safe = st.session_state.ai_deep_report.replace("$", "\\$")
-        st.markdown(f'<div class="deep-report">{""}</div>', unsafe_allow_html=True)
+        # $를 USD로 치환 (LaTeX 해석 방지 + 마크다운 깨짐 방지)
+        safe = st.session_state.ai_deep_report.replace("$", "USD ")
+        st.markdown("---")
         st.markdown(safe)
         st.divider()
         st.download_button("리포트 다운로드 (.md)", data=st.session_state.ai_deep_report,
