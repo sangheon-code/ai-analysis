@@ -464,23 +464,36 @@ st.markdown(f"""
 st.markdown('<div class="section-hdr">핵심 지표</div>', unsafe_allow_html=True)
 render_ai("overview")
 
-m1, m2, m3, m4, m5 = st.columns(5)
+m1, m2, m3, m4 = st.columns(4)
 m1.metric("총 거래", f"{len(df)}건")
 m2.metric("승률", f"{win_rate:.1f}%")
 m3.metric("평균 레버리지", f"{avg_lev:.1f}x")
 m4.metric("총 수수료", f"${total_fee:,.2f}")
-m5.metric("초기 자산", f"${init_bal_total:,.0f}")
+
+# ── 초기 자산 (전체 + 거래소별) ──────────────────
+_n_ex = df["exchange"].nunique() if "exchange" in df.columns else 1
+_bal_cols = st.columns(1 + _n_ex)
+with _bal_cols[0]:
+    st.metric("전체 초기 자산", f"${init_bal_total:,.0f}")
+if _n_ex >= 1 and "exchange" in df.columns:
+    for i, en in enumerate(sorted(df["exchange"].unique())):
+        with _bal_cols[i + 1]:
+            eb = _ex_bal.get(en, 0)
+            st.metric(f"{en} 초기 자산", f"${eb:,.0f}")
 
 
-# ── 거래소별 카드 ────────────────────────────────
+# ── 거래소별 성과 카드 ───────────────────────────
 if "exchange" in df.columns and df["exchange"].nunique() > 1:
     st.markdown('<div class="section-hdr">거래소별 성과</div>', unsafe_allow_html=True)
     render_ai("exchange_comparison")
     ex_cols = st.columns(df["exchange"].nunique())
     for i, (en, grp) in enumerate(df.groupby("exchange")):
         with ex_cols[i]:
-            ep = float((grp["pnl_usdt"] - grp["fee_usdt"]).sum())
+            eb = _ex_bal.get(en, 10_000)
+            ex_current = max(0, eb + float(grp["net_pnl"].sum()))
+            ep = float(grp["net_pnl"].sum())
             ew = len(grp[grp["pnl_usdt"] > 0]) / len(grp) * 100
+            ex_roi = (ep / eb * 100) if eb > 0 else 0
             color = _EX_COLOR.get(en, "#6b8aff")
             pnl_color = _C["profit"] if ep >= 0 else _C["loss"]
             st.markdown(
@@ -488,9 +501,11 @@ if "exchange" in df.columns and df["exchange"].nunique() > 1:
                 f'background:rgba(255,255,255,0.02);border-radius:0 10px 10px 0;margin-bottom:8px">'
                 f'<div style="font-size:13px;color:#7b7b9e;font-weight:600">{en}</div>'
                 f'<div style="font-size:22px;font-family:JetBrains Mono;color:{pnl_color};font-weight:700">'
-                f'{"+" if ep >= 0 else ""}${ep:,.2f}</div>'
-                f'<div style="font-size:12px;color:#7b7b9e">'
-                f'{len(grp)}건 · 승률 {ew:.1f}% · 평균 {grp["leverage"].mean():.1f}x</div>'
+                f'${ex_current:,.2f}</div>'
+                f'<div style="font-size:14px;font-family:JetBrains Mono;color:{pnl_color}">'
+                f'{ex_roi:+.2f}% ({_pnl_sign}${abs(ep):,.2f})</div>'
+                f'<div style="font-size:12px;color:#7b7b9e;margin-top:4px">'
+                f'초기 ${eb:,.0f} · {len(grp)}건 · 승률 {ew:.1f}%</div>'
                 f'</div>',
                 unsafe_allow_html=True,
             )
