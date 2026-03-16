@@ -167,8 +167,8 @@ _C = {
     "secondary": "#a78bfa", "neutral": "#4a4a6a",
 }
 _EX_COLOR = {
-    "Binance": "#F0B90B", "Bybit": "#F7A600",
-    "OKX": "#FFFFFF", "Bitget": "#00D4AA", "Demo": "#6b8aff",
+    "Binance": "#F0B90B", "Bybit": "#FF6500",
+    "OKX": "#00C8FF", "Bitget": "#00D4AA", "Demo": "#6b8aff",
 }
 
 
