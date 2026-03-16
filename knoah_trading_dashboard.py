@@ -358,17 +358,22 @@ with tab_dashboard:
     # ── 자산 곡선 ────────────────────────────────
     st.markdown('<div class="section-hdr">자산 곡선</div>', unsafe_allow_html=True)
     fig_eq = go.Figure()
-    fig_eq.add_trace(go.Scatter(x=ds["datetime"], y=ds["equity"], mode="lines", name="통합" if multi_ex else "자산",
-        line=dict(color=_C["primary"], width=2.5), fill="tonexty" if False else None))
+    # 거래소별 라인 먼저 (아래 깔림 방지)
     if multi_ex:
         for en, grp in _all_eq.groupby("exchange"):
             fig_eq.add_trace(go.Scatter(x=grp["datetime"], y=grp["ex_equity"], mode="lines", name=en,
-                line=dict(color=_EX_COLOR.get(en, "#888"), width=1.5, dash="dot")))
+                line=dict(color=_EX_COLOR.get(en, "#888"), width=2)))
+    # 통합 라인 위에
+    fig_eq.add_trace(go.Scatter(x=ds["datetime"], y=ds["equity"], mode="lines", name="통합" if multi_ex else "자산",
+        line=dict(color=_C["primary"], width=2.5 if not multi_ex else 2, dash="dot" if multi_ex else "solid")))
     _ref_bal = _total_init if multi_ex else (list(_ex_bal.values())[0] if _ex_bal else init_bal_total)
     fig_eq.add_hline(y=_ref_bal, line_dash="dash", line_color="#4a4a6a", line_width=1, annotation_text="초기 잔고", annotation_font_color="#7b7b9e")
-    # y축 범위: 데이터 범위에 맞춰서 변동이 잘 보이도록
+    # y축 범위: 모든 라인 포함
     _eq_min = float(ds["equity"].min())
     _eq_max = float(ds["equity"].max())
+    if multi_ex:
+        _eq_min = min(_eq_min, float(_all_eq["ex_equity"].min()))
+        _eq_max = max(_eq_max, float(_all_eq["ex_equity"].max()))
     _eq_pad = max((_eq_max - _eq_min) * 0.1, 1)
     fig_eq.update_layout(**{**_CHART, "height": 380}, xaxis_title="", yaxis_title="USDT",
         yaxis_range=[_eq_min - _eq_pad, _eq_max + _eq_pad],
