@@ -135,25 +135,41 @@ def fetch_trades(exchange, exchange_name: str,
 # ── Binance Futures ──────────────────────────────
 def _fetch_binance(exchange, since_ms: int, symbols: list = None) -> pd.DataFrame:
     """
-    Binance USDT-M: /fapi/v1/userTrades + /fapi/v1/income (REALIZED_PNL)
+    Binance USDT-M: 전체 income 조회 (PnL + 수수료 + 펀딩피)
     """
     rows = []
 
-    # 1) REALIZED_PNL income records (페이지네이션)
-    income_data = []
+    # 1) 모든 income 조회 (페이지네이션)
+    all_income = []
     _cursor_time = since_ms
-    for _ in range(50):  # 최대 50페이지 = 50,000건
+    for _ in range(100):
         batch = exchange.fapiPrivateGetIncome({
-            "incomeType": "REALIZED_PNL",
             "startTime": _cursor_time,
             "limit": 1000,
         })
         if not batch:
             break
-        income_data.extend(batch)
+        all_income.extend(batch)
         _cursor_time = int(batch[-1].get("time", 0)) + 1
         if len(batch) < 1000:
             break
+
+    # income을 타입별로 분리
+    income_data = [i for i in all_income if i.get("incomeType") == "REALIZED_PNL"]
+    commission_data = [i for i in all_income if i.get("incomeType") == "COMMISSION"]
+    funding_data = [i for i in all_income if i.get("incomeType") == "FUNDING_FEE"]
+
+    # 심볼+시간 기준으로 수수료/펀딩피 매핑
+    _fee_map = {}  # (symbol, time_bucket) → fee
+    for c in commission_data:
+        sym = c.get("symbol", "")
+        ts = int(c.get("time", 0)) // 60000  # 분 단위 버킷
+        _fee_map[(sym, ts)] = _fee_map.get((sym, ts), 0) + abs(float(c.get("income", 0)))
+    _funding_map = {}
+    for f in funding_data:
+        sym = f.get("symbol", "")
+        ts = int(f.get("time", 0)) // 60000
+        _funding_map[(sym, ts)] = _funding_map.get((sym, ts), 0) + float(f.get("income", 0))
 
     # 2) User trades for entry/exit details (페이지네이션)
     trade_symbols = symbols or list(set(i.get("symbol", "") for i in income_data if i.get("symbol")))
@@ -190,16 +206,23 @@ def _fetch_binance(exchange, since_ms: int, symbols: list = None) -> pd.DataFram
         if recent:
             last = recent[-1]
             side = "LONG" if last.get("side") == "BUY" and not last.get("buyer") else "SHORT"
-            leverage = 1  # income에는 레버리지 정보 없음, 별도 조회 필요
+            leverage = 1
             qty = sum(float(t.get("quoteQty", 0)) for t in recent)
-            fee = sum(float(t.get("commission", 0)) for t in recent)
+            fee = sum(abs(float(t.get("commission", 0))) for t in recent)
             price = float(last.get("price", 0))
         else:
             side = "LONG" if pnl > 0 else "SHORT"
             leverage = 1
             qty = abs(pnl) * 10
-            fee = qty * 0.0004
             price = 0
+            # fee_map에서 수수료 가져오기
+            ts_bucket = ts // 60000
+            fee = _fee_map.get((symbol, ts_bucket), 0)
+
+        # 펀딩피 추가
+        ts_bucket = ts // 60000
+        funding = abs(_funding_map.get((symbol, ts_bucket), 0))
+        total_fee = fee + funding
 
         rows.append({
             "datetime": datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d %H:%M"),
@@ -210,7 +233,7 @@ def _fetch_binance(exchange, since_ms: int, symbols: list = None) -> pd.DataFram
             "exit_price": 0,
             "quantity_usdt": round(abs(qty), 2),
             "pnl_usdt": round(pnl, 2),
-            "fee_usdt": round(abs(fee), 2),
+            "fee_usdt": round(total_fee, 2),
             "holding_minutes": 0,
             "order_type": "MARKET",
             "stoploss_set": False,
