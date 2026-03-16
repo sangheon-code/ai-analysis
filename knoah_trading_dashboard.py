@@ -204,18 +204,16 @@ with st.sidebar:
         st.rerun()
 
     st.markdown("---")
-    st.markdown("### 🤖 Claude API")
-    # .env → os.getenv, Streamlit Cloud → st.secrets
-    _default_key = os.getenv("ANTHROPIC_API_KEY", "")
-    if not _default_key:
-        try:
-            _default_key = st.secrets.get("ANTHROPIC_API_KEY", "")
-        except Exception:
-            _default_key = ""
-    api_key_claude = st.text_input("API Key", type="password", value=_default_key, help=".env ANTHROPIC_API_KEY 기본값", key="api_key_claude")
-
-    st.markdown("---")
     st.markdown("<div style='text-align:center;color:#55556a;font-size:11px'>KNOAH v1.0 · Powered by Claude</div>", unsafe_allow_html=True)
+
+
+# ── Claude API Key (환경변수 / Streamlit Secrets) ──
+api_key_claude = os.getenv("ANTHROPIC_API_KEY", "")
+if not api_key_claude:
+    try:
+        api_key_claude = st.secrets.get("ANTHROPIC_API_KEY", "")
+    except Exception:
+        api_key_claude = ""
 
 
 # ══════════════════════════════════════════════════
@@ -488,7 +486,10 @@ with tab_ai:
         st.warning("거래 데이터가 10건 미만입니다. 더 많은 데이터가 있으면 분석 정확도가 올라갑니다.")
 
     def _run_deep_report():
-        _key = st.session_state.get("api_key_claude", "")
+        _key = os.getenv("ANTHROPIC_API_KEY", "")
+        if not _key:
+            try: _key = st.secrets.get("ANTHROPIC_API_KEY", "")
+            except Exception: _key = ""
         if not _key:
             return
         _df = st.session_state.trades.copy()
