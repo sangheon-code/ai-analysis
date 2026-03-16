@@ -255,43 +255,51 @@ _connections = st.session_state.connections
 _dep_all = st.session_state.deposits if not st.session_state.deposits.empty else pd.DataFrame(columns=["type", "amount_usdt", "exchange"])
 
 # 거래소별 입출금 집계
-_ex_bal = {}        # 초기 잔고 (= 총입금 - 총출금, 거래 전 기준)
-_ex_deposits = {}   # 총 입금
+_ex_initial = {}      # 초기 자산 (첫 입금)
+_ex_deposits = {}     # 총 입금
 _ex_withdrawals = {}  # 총 출금
 
 for en in (df["exchange"].unique() if "exchange" in df.columns else ["default"]):
     if not _dep_all.empty and "exchange" in _dep_all.columns:
-        ex_dep = _dep_all[_dep_all["exchange"] == en]
-        total_in = float(ex_dep[ex_dep["type"] == "DEPOSIT"]["amount_usdt"].sum()) if len(ex_dep) > 0 else 0
+        ex_dep = _dep_all[_dep_all["exchange"] == en].sort_values("datetime") if "datetime" in _dep_all.columns else _dep_all[_dep_all["exchange"] == en]
+        dep_list = ex_dep[ex_dep["type"] == "DEPOSIT"]["amount_usdt"]
+        total_in = float(dep_list.sum()) if len(dep_list) > 0 else 0
+        first_deposit = float(dep_list.iloc[0]) if len(dep_list) > 0 else 0
         total_out = float(ex_dep[ex_dep["type"] == "WITHDRAWAL"]["amount_usdt"].sum()) if len(ex_dep) > 0 else 0
     else:
-        total_in, total_out = 10_000, 0
+        total_in, first_deposit, total_out = 10_000, 10_000, 0
 
+    _ex_initial[en] = first_deposit if first_deposit > 0 else 10_000
     _ex_deposits[en] = total_in
     _ex_withdrawals[en] = total_out
-    # 초기 투입 = 총입금 - 총출금 (순 투입액)
-    _ex_bal[en] = max(total_in - total_out, 0) if total_in > 0 else 10_000
 
-# 현재 잔고 = API 잔고 (연결 시) 또는 초기잔고 + PnL (비연결 시)
+# 현재 잔고 = API (연결 시) 또는 계산 (비연결 시)
 _current_bal = 0
+_ex_bal = {}  # 호환용
 for en in (df["exchange"].unique() if "exchange" in df.columns else ["default"]):
     ex_pnl = float(df[df["exchange"] == en]["net_pnl"].sum()) if en != "default" else float(df["net_pnl"].sum())
+    _ex_bal[en] = _ex_initial[en]  # equity curve용
     if en in _connections:
-        # API 연결됨 → 실제 잔고 (0이어도 그대로)
         _current_bal += float(_connections[en].get("balance", 0))
     else:
-        # 연결 없음 → 계산
-        _current_bal += max(0, _ex_bal[en] + ex_pnl)
+        # 현재자산 = 초기자산 + 추가입금 - 총출금 + 거래손익
+        extra_dep = _ex_deposits[en] - _ex_initial[en]
+        _current_bal += max(0, _ex_initial[en] + extra_dep - _ex_withdrawals[en] + ex_pnl)
 
-init_bal_total = sum(_ex_bal.values())
-_total_deposits = sum(_ex_deposits.values())
-_total_withdrawals = sum(_ex_withdrawals.values())
-
-# KNOAH 수익률: 순이익 / (초기자산 + 추가입금)
+# KNOAH 수익률 공식
+# 초기자산 = 첫 입금
+# 추가입금 = 총입금 - 초기자산
 # 순이익 = 현재자산 - 초기자산 - 추가입금 + 총출금
-net_profit = _current_bal - init_bal_total
-roi_denom = init_bal_total if init_bal_total > 0 else 1
+# 수익률 = 순이익 / (초기자산 + 추가입금)
+_init_total = sum(_ex_initial.values())
+_dep_total = sum(_ex_deposits.values())
+_wd_total = sum(_ex_withdrawals.values())
+_extra_dep_total = _dep_total - _init_total  # 추가 입금
+
+net_profit = _current_bal - _init_total - _extra_dep_total + _wd_total
+roi_denom = _init_total + _extra_dep_total
 roi = (net_profit / roi_denom * 100) if roi_denom > 0 else 0
+init_bal_total = _init_total
 win_count = len(df[df["pnl_usdt"] > 0])
 win_rate = win_count / len(df) * 100
 total_fee = float(df["fee_usdt"].sum())
