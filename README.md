@@ -32,7 +32,7 @@ https://ai-analysis-dgcg8wrfbeawblsokatkqt.streamlit.app/
 
 - 여러 거래소 동시 연결 및 통합 분석
 - 최대 3년치 데이터 조회 (페이지네이션)
-- 바이낸스 한국 IP 차단 우회 (sapi 대신 fapi 사용)
+- 바이낸스 sapi 차단 우회 (fapi 직접 호출). 단, Streamlit Cloud 등 클라우드 서버 IP는 바이낸스에서 차단될 수 있음
 
 ### 수익률 계산 (KNOAH 공식)
 ```
