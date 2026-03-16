@@ -529,17 +529,19 @@ with tab_ai:
             try: _key = st.secrets.get("ANTHROPIC_API_KEY", "")
             except Exception: _key = ""
         if not _key:
+            st.session_state.ai_deep_report = "API 키가 설정되지 않았습니다."
             return
-        _df = st.session_state.trades.copy()
-        _deps = st.session_state.deposits
-        _basic = aggregate_data(_df, _deps, "통합")
-        _deep = aggregate_deep_data(_df, _deps)
         try:
+            _df = st.session_state.trades.copy()
+            _deps = st.session_state.deposits
+            _basic = aggregate_data(_df, _deps, "통합")
+            _deep = aggregate_deep_data(_df, _deps)
             result = call_claude_deep_report(_basic, _deep, _key)
             st.session_state.ai_deep_report = result["report"]
             st.session_state.ai_last_cost = result
         except Exception as e:
-            st.session_state.ai_deep_report = f"리포트 생성 실패: {e}"
+            import traceback
+            st.session_state.ai_deep_report = f"리포트 생성 실패: {type(e).__name__}: {e}\n```\n{traceback.format_exc()[-500:]}\n```"
             st.session_state.ai_last_cost = None
 
     # API 잔고 조회
