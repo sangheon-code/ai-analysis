@@ -4,7 +4,7 @@
 
 ## 데모
 
-https://ai-analysis-knoah.streamlit.app
+https://ai-analysis-dgcg8wrfbeawblsokatkqt.streamlit.app/
 
 ## 기능
 
