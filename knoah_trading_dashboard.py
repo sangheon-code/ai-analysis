@@ -334,6 +334,7 @@ with top_right:
         use_container_width=True,
         type="primary",
         disabled=not has_data,
+        key="btn_ai_analyze",
     )
 
 # ── AI 분석 실행 ─────────────────────────────────
