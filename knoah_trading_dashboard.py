@@ -276,9 +276,11 @@ for en in (df["exchange"].unique() if "exchange" in df.columns else ["default"])
 _current_bal = 0
 for en in (df["exchange"].unique() if "exchange" in df.columns else ["default"]):
     ex_pnl = float(df[df["exchange"] == en]["net_pnl"].sum()) if en != "default" else float(df["net_pnl"].sum())
-    if en in _connections and _connections[en].get("balance", 0) > 0:
-        _current_bal += float(_connections[en]["balance"])
+    if en in _connections:
+        # API 연결됨 → 실제 잔고 (0이어도 그대로)
+        _current_bal += float(_connections[en].get("balance", 0))
     else:
+        # 연결 없음 → 계산
         _current_bal += max(0, _ex_bal[en] + ex_pnl)
 
 init_bal_total = sum(_ex_bal.values())
