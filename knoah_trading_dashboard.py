@@ -307,42 +307,17 @@ avg_lev = float(df["leverage"].mean())
 _roi_color = _C["profit"] if roi >= 0 else _C["loss"]
 _pnl_sign = "+" if net_profit >= 0 else ""
 
-# ── Equity 계산 (입출금 반영) ─────────────────────
+# ── Equity 계산 (순수 거래 성과, 입출금 제외) ─────
+# 입출금은 자금 이동이지 거래 성과가 아니므로 equity curve에서 제외
+# 초기잔고(첫 입금) 기준으로 PnL만 누적
 multi_ex = "exchange" in df.columns and df["exchange"].nunique() > 1
-
-def _calc_equity_with_transfers(trades_sorted, init_bal, dep_df, exchange_name):
-    """거래 + 입출금을 시간순으로 합쳐서 equity 계산"""
-    equity_vals = []
-    bal = init_bal
-    # 입출금 이벤트를 datetime 매핑
-    transfers = {}
-    if not dep_df.empty and "exchange" in dep_df.columns:
-        ex_dep = dep_df[dep_df["exchange"] == exchange_name].copy()
-        if not ex_dep.empty and "datetime" in ex_dep.columns:
-            for _, row in ex_dep.iterrows():
-                dt = str(row["datetime"])
-                amt = float(row["amount_usdt"])
-                if row["type"] == "DEPOSIT":
-                    transfers[dt] = transfers.get(dt, 0) + amt
-                else:
-                    transfers[dt] = transfers.get(dt, 0) - amt
-
-    for _, row in trades_sorted.iterrows():
-        dt_str = str(row["datetime"])
-        # 해당 시점 이전 입출금 반영
-        if dt_str in transfers:
-            bal += transfers.pop(dt_str)
-        bal += float(row["net_pnl"])
-        bal = max(bal, 0)
-        equity_vals.append(bal)
-    return equity_vals
 
 if multi_ex:
     _frames = []
     for en, grp in df.groupby("exchange"):
         g = grp.sort_values("datetime").copy()
         eb = _ex_bal.get(en, 10_000)
-        g["ex_equity"] = _calc_equity_with_transfers(g, eb, _dep_all, en)
+        g["ex_equity"] = eb + g["net_pnl"].cumsum()
         _frames.append(g[["datetime", "exchange", "net_pnl", "symbol", "side", "ex_equity"]])
     _all_eq = pd.concat(_frames).sort_values("datetime")
     _pivot = _all_eq.pivot_table(index="datetime", columns="exchange", values="ex_equity", aggfunc="last").ffill().bfill()
@@ -353,8 +328,7 @@ if multi_ex:
 else:
     ds = df.sort_values("datetime").copy()
     eb = list(_ex_bal.values())[0] if _ex_bal else init_bal_total
-    _en = list(_ex_bal.keys())[0] if _ex_bal else "default"
-    ds["equity"] = _calc_equity_with_transfers(ds, eb, _dep_all, _en)
+    ds["equity"] = eb + ds["net_pnl"].cumsum()
     _total_init = eb
 
 
