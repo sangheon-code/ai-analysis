@@ -57,8 +57,7 @@ _EXTRA_CSS = """
     line-height: 1.5;
 }
 .ai-comment::before {
-    content: "🤖 ";
-    font-size: 12px;
+    content: "";
 }
 .ai-actions {
     background: linear-gradient(135deg, rgba(167,139,250,0.10) 0%, rgba(107,138,255,0.06) 100%);
