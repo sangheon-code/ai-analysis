@@ -375,10 +375,44 @@ def _fetch_bitget(exchange) -> pd.DataFrame:
 
 # ── 입출금 내역 ──────────────────────────────────
 def fetch_deposits_withdrawals(exchange, days: int = 90) -> pd.DataFrame:
-    """입출금 내역 조회"""
+    """입출금 내역 조회 (바이낸스: 선물 income TRANSFER 사용)"""
     rows = []
     since_ms = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
+    exchange_id = exchange.id if hasattr(exchange, "id") else ""
 
+    # 바이낸스: sapi 차단 우회 → fapi income에서 TRANSFER 내역 조회
+    if exchange_id == "binance":
+        try:
+            _cursor = since_ms
+            for _ in range(20):
+                transfers = exchange.fapiPrivateGetIncome({
+                    "incomeType": "TRANSFER",
+                    "startTime": _cursor,
+                    "limit": 1000,
+                })
+                if not transfers:
+                    break
+                for t in transfers:
+                    amt = float(t.get("income", 0))
+                    ts = int(t.get("time", 0))
+                    rows.append({
+                        "datetime": datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d %H:%M"),
+                        "type": "DEPOSIT" if amt > 0 else "WITHDRAWAL",
+                        "amount_usdt": round(abs(amt), 2),
+                    })
+                _cursor = int(transfers[-1].get("time", 0)) + 1
+                if len(transfers) < 1000:
+                    break
+        except Exception:
+            pass
+
+        if not rows:
+            return pd.DataFrame(columns=["id", "datetime", "type", "amount_usdt"])
+        df = pd.DataFrame(rows).sort_values("datetime").reset_index(drop=True)
+        df.insert(0, "id", range(len(df)))
+        return df
+
+    # 다른 거래소: 기존 방식
     try:
         deposits = exchange.fetch_deposits("USDT", since_ms, 100)
         for dep in deposits:
