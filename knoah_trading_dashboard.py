@@ -1,12 +1,13 @@
 """
 KNOAH 거래 분석 대시보드
 ========================
-멀티 거래소 API 연동 + Claude AI 섹션별 인라인 분석
+멀티 거래소 API 연동 + Claude AI 딥 리포트
 """
 
 import os
 import streamlit as st
 import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
 from datetime import datetime
 from dotenv import load_dotenv
@@ -18,9 +19,7 @@ from lib.config import (
     CUSTOM_CSS, TRADE_COLUMNS, DEPOSIT_COLUMNS,
 )
 from lib.dummy import generate_trades, generate_deposits
-from lib.analysis import (
-    aggregate_data, call_claude_sections, generate_dummy_comments,
-)
+from lib.analysis import aggregate_data, aggregate_deep_data, call_claude_deep_report
 
 try:
     from lib.exchanges import (
@@ -36,53 +35,18 @@ except ImportError:
 # ══════════════════════════════════════════════════
 # Page Config & CSS
 # ══════════════════════════════════════════════════
-st.set_page_config(
-    page_title="KNOAH Trading Analysis",
-    page_icon="📊",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-# AI 코멘트 스타일 추가
-_EXTRA_CSS = """
-<style>
-.ai-comment {
-    background: linear-gradient(90deg, rgba(107,138,255,0.08) 0%, rgba(107,138,255,0.02) 100%);
-    border-left: 3px solid #6b8aff;
-    border-radius: 0 8px 8px 0;
-    padding: 8px 14px;
-    margin: 4px 0 16px 0;
-    font-size: 13px;
-    color: #b0b0d0;
-    line-height: 1.5;
-}
-.ai-comment::before {
-    content: "";
-}
-.ai-actions {
-    background: linear-gradient(135deg, rgba(167,139,250,0.10) 0%, rgba(107,138,255,0.06) 100%);
-    border: 1px solid rgba(167,139,250,0.2);
-    border-radius: 12px;
-    padding: 16px 20px;
-    margin: 12px 0;
-}
-.ai-actions-title {
-    font-size: 14px;
-    font-weight: 700;
-    color: #a78bfa;
-    margin-bottom: 10px;
-}
-.ai-action-item {
-    font-size: 13px;
-    color: #c0c0e0;
-    padding: 4px 0 4px 8px;
-    border-left: 2px solid #a78bfa44;
-    margin: 6px 0;
-}
-</style>
-"""
+st.set_page_config(page_title="KNOAH Trading Analysis", page_icon="📊", layout="wide", initial_sidebar_state="expanded")
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
-st.markdown(_EXTRA_CSS, unsafe_allow_html=True)
+st.markdown("""<style>
+.deep-report { background: linear-gradient(135deg, #0f0f1a 0%, #151525 100%);
+    border: 1px solid #1e1e35; border-radius: 14px; padding: 28px 32px;
+    line-height: 1.9; font-size: 14px; }
+.deep-report h3 { color: #a78bfa; margin-top: 28px; font-size: 17px; border-bottom: 1px solid #1e1e35; padding-bottom: 8px; }
+.deep-report strong { color: #e8e8ed; }
+.deep-report table { width: 100%; border-collapse: collapse; margin: 12px 0; }
+.deep-report th, .deep-report td { padding: 6px 12px; border: 1px solid #1e1e35; font-size: 13px; }
+.deep-report th { background: #1a1a2e; color: #7b7b9e; }
+</style>""", unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════════
@@ -91,7 +55,7 @@ st.markdown(_EXTRA_CSS, unsafe_allow_html=True)
 _DEFAULTS = {
     "trades": pd.DataFrame(columns=TRADE_COLUMNS),
     "deposits": pd.DataFrame(columns=DEPOSIT_COLUMNS),
-    "ai_comments": None,        # dict with section keys
+    "ai_deep_report": None,
     "trade_id_counter": 0,
     "connections": {},
 }
@@ -103,15 +67,13 @@ for k, v in _DEFAULTS.items():
 # ══════════════════════════════════════════════════
 # Helpers
 # ══════════════════════════════════════════════════
-def connected_exchanges() -> list:
+def connected_exchanges():
     return list(st.session_state.connections.keys())
 
-
-def is_any_connected() -> bool:
+def is_any_connected():
     return len(st.session_state.connections) > 0
 
-
-def merge_exchange_trades(new_df: pd.DataFrame, exchange_name: str):
+def merge_exchange_trades(new_df, exchange_name):
     existing = st.session_state.trades
     if existing.empty:
         st.session_state.trades = new_df
@@ -122,8 +84,7 @@ def merge_exchange_trades(new_df: pd.DataFrame, exchange_name: str):
     st.session_state.trades["id"] = range(len(st.session_state.trades))
     st.session_state.trade_id_counter = len(st.session_state.trades)
 
-
-def merge_exchange_deposits(new_df: pd.DataFrame, exchange_name: str):
+def merge_exchange_deposits(new_df, exchange_name):
     existing = st.session_state.deposits
     if "exchange" not in new_df.columns and not new_df.empty:
         new_df.insert(1, "exchange", exchange_name)
@@ -136,39 +97,16 @@ def merge_exchange_deposits(new_df: pd.DataFrame, exchange_name: str):
         st.session_state.deposits = pd.concat([other, new_df], ignore_index=True)
 
 
-def ai(key: str):
-    """세션에 저장된 AI 코멘트 가져오기"""
-    if st.session_state.ai_comments and key in st.session_state.ai_comments:
-        return st.session_state.ai_comments[key]
-    return None
-
-
-def render_ai(key: str):
-    """AI 코멘트 렌더링 (있으면)"""
-    comment = ai(key)
-    if comment:
-        st.markdown(f'<div class="ai-comment">{comment}</div>', unsafe_allow_html=True)
-
-
 # ══════════════════════════════════════════════════
 # Plotly Theme
 # ══════════════════════════════════════════════════
 _CHART = dict(
-    template="plotly_dark",
-    paper_bgcolor="rgba(0,0,0,0)",
-    plot_bgcolor="rgba(0,0,0,0)",
+    template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
     font=dict(family="Inter, sans-serif", size=12, color="#a0a0b8"),
-    margin=dict(l=40, r=20, t=32, b=36),
-    height=300,
+    margin=dict(l=40, r=20, t=32, b=36), height=300,
 )
-_C = {
-    "profit": "#00e59b", "loss": "#ff4d6a", "primary": "#6b8aff",
-    "secondary": "#a78bfa", "neutral": "#4a4a6a",
-}
-_EX_COLOR = {
-    "Binance": "#F0B90B", "Bybit": "#FF6500",
-    "OKX": "#00C8FF", "Bitget": "#00D4AA", "Demo": "#6b8aff",
-}
+_C = {"profit": "#00e59b", "loss": "#ff4d6a", "primary": "#6b8aff", "secondary": "#a78bfa", "neutral": "#4a4a6a"}
+_EX_COLOR = {"Binance": "#F0B90B", "Bybit": "#FF6500", "OKX": "#00C8FF", "Bitget": "#00D4AA", "Demo": "#6b8aff"}
 
 
 # ══════════════════════════════════════════════════
@@ -178,30 +116,23 @@ with st.sidebar:
     st.markdown("# KNOAH")
     st.caption("Trading Analysis Platform")
 
-    # ── 연결된 거래소 ────────────────────────────
     st.markdown("---")
     st.markdown("### 🔗 거래소")
-
     if st.session_state.connections:
         for ex_name, info in list(st.session_state.connections.items()):
             c1, c2, c3 = st.columns([2, 2, 1])
-            with c1:
-                st.markdown(f'<span class="conn-dot on"></span> **{ex_name}**', unsafe_allow_html=True)
-            with c2:
-                st.caption(f"${info.get('balance', 0):,.2f}")
+            with c1: st.markdown(f'<span class="conn-dot on"></span> **{ex_name}**', unsafe_allow_html=True)
+            with c2: st.caption(f"${info.get('balance', 0):,.2f}")
             with c3:
                 if st.button("✕", key=f"rm_{ex_name}"):
                     del st.session_state.connections[ex_name]
                     if not st.session_state.trades.empty and "exchange" in st.session_state.trades.columns:
-                        st.session_state.trades = st.session_state.trades[
-                            st.session_state.trades["exchange"] != ex_name
-                        ].reset_index(drop=True)
-                    st.session_state.ai_comments = None
+                        st.session_state.trades = st.session_state.trades[st.session_state.trades["exchange"] != ex_name].reset_index(drop=True)
+                    st.session_state.ai_deep_report = None
                     st.rerun()
 
     with st.expander("➕ 거래소 추가", expanded=not is_any_connected()):
-        if not HAS_CCXT:
-            st.warning("`pip install ccxt` 필요")
+        if not HAS_CCXT: st.warning("`pip install ccxt` 필요")
         exchange_name = st.selectbox("거래소", EXCHANGES, key="sel_exchange")
         api_key_exchange = st.text_input("API Key", type="password", key="api_key_exchange")
         api_secret = st.text_input("API Secret", type="password", key="api_secret")
@@ -215,19 +146,13 @@ with st.sidebar:
                         ex = create_exchange(exchange_name, api_key_exchange, api_secret, passphrase)
                         result = test_connection(ex)
                         if result["ok"]:
-                            st.session_state.connections[exchange_name] = {
-                                "instance": ex, "balance": result.get("total_usdt", 0), "msg": result["msg"],
-                            }
+                            st.session_state.connections[exchange_name] = {"instance": ex, "balance": result.get("total_usdt", 0), "msg": result["msg"]}
                             st.success(f"{exchange_name} 연결!")
                             st.rerun()
-                        else:
-                            st.error(result["msg"])
-                    except Exception as e:
-                        st.error(str(e))
-            else:
-                st.warning("API Key/Secret 필요")
+                        else: st.error(result["msg"])
+                    except Exception as e: st.error(str(e))
+            else: st.warning("API Key/Secret 필요")
 
-    # ── 데이터 가져오기 ──────────────────────────
     if is_any_connected():
         st.markdown("---")
         fetch_days = st.number_input("조회 기간(일)", 7, 90, 30, key="fetch_days")
@@ -239,46 +164,30 @@ with st.sidebar:
                 with st.spinner(f"{en}..."):
                     try:
                         tdf = exchange_fetch_trades(info["instance"], en, days=fetch_days)
-                        if not tdf.empty:
-                            merge_exchange_trades(tdf, en)
-                            total += len(tdf)
+                        if not tdf.empty: merge_exchange_trades(tdf, en); total += len(tdf)
                         ddf = fetch_deposits_withdrawals(info["instance"], days=fetch_days)
-                        if not ddf.empty:
-                            merge_exchange_deposits(ddf, en)
+                        if not ddf.empty: merge_exchange_deposits(ddf, en)
                         st.success(f"{en}: {len(tdf)}건")
-                    except Exception as e:
-                        st.error(f"{en}: {e}")
-            if total > 0:
-                st.session_state.ai_comments = None
-                st.rerun()
+                    except Exception as e: st.error(f"{en}: {e}")
+            if total > 0: st.session_state.ai_deep_report = None; st.rerun()
 
-    # ── 더미 데이터 ──────────────────────────────
     st.markdown("---")
     st.markdown("### 🎲 더미 데이터")
     c_a, c_b = st.columns(2)
-    with c_a:
-        n_trades = st.number_input("건수", 10, 500, 100, step=10, key="n_trades")
-    with c_b:
-        n_days = st.number_input("기간(일)", 7, 90, 30, step=7, key="n_days")
+    with c_a: n_trades = st.number_input("건수", 10, 500, 100, step=10, key="n_trades")
+    with c_b: n_days = st.number_input("기간(일)", 7, 90, 30, step=7, key="n_days")
     dummy_exchanges = st.multiselect("거래소", EXCHANGES, default=["Binance"], key="dummy_ex")
-
-    # 거래소별 초기 잔고 설정
     ex_balances = {}
     for dex in (dummy_exchanges or ["Binance"]):
-        ex_balances[dex] = st.number_input(
-            f"{dex} 초기 잔고(USDT)", 100, 1_000_000, 10_000, step=1000,
-            key=f"bal_{dex}",
-        )
+        ex_balances[dex] = st.number_input(f"{dex} 초기 잔고(USDT)", 100, 1_000_000, 10_000, step=1000, key=f"bal_{dex}")
 
     if st.button("더미 데이터 생성", use_container_width=True):
         all_t, all_d = [], []
         exes = dummy_exchanges or ["Binance"]
         per_n = max(n_trades // len(exes), 10)
         for i, en in enumerate(exes):
-            tdf = generate_trades(per_n, en, n_days, start_id=i * per_n)
-            all_t.append(tdf)
-            bal = ex_balances.get(en, 10_000)
-            dep = generate_deposits(bal)
+            all_t.append(generate_trades(per_n, en, n_days, start_id=i * per_n))
+            dep = generate_deposits(ex_balances.get(en, 10_000))
             dep.insert(1, "exchange", en)
             all_d.append(dep)
         combined = pd.concat(all_t, ignore_index=True).sort_values("datetime").reset_index(drop=True)
@@ -286,513 +195,316 @@ with st.sidebar:
         st.session_state.trades = combined
         st.session_state.deposits = pd.concat(all_d, ignore_index=True).reset_index(drop=True)
         st.session_state.trade_id_counter = len(combined)
-        st.session_state.ai_comments = None
+        st.session_state.ai_deep_report = None
         st.rerun()
 
     if st.button("🗑 초기화", use_container_width=True):
-        st.session_state.trades = pd.DataFrame(columns=TRADE_COLUMNS)
-        st.session_state.deposits = pd.DataFrame(columns=DEPOSIT_COLUMNS)
-        st.session_state.ai_comments = None
-        st.session_state.trade_id_counter = 0
+        for k in ["trades", "deposits", "ai_deep_report", "trade_id_counter"]:
+            st.session_state[k] = _DEFAULTS[k]
         st.rerun()
 
-    # ── Claude API ───────────────────────────────
     st.markdown("---")
     st.markdown("### 🤖 Claude API")
     _default_key = os.getenv("ANTHROPIC_API_KEY", "")
-    api_key_claude = st.text_input(
-        "API Key", type="password", value=_default_key,
-        help=".env ANTHROPIC_API_KEY 기본값", key="api_key_claude",
-    )
+    api_key_claude = st.text_input("API Key", type="password", value=_default_key, help=".env ANTHROPIC_API_KEY 기본값", key="api_key_claude")
 
     st.markdown("---")
-    st.markdown(
-        "<div style='text-align:center;color:#55556a;font-size:11px'>"
-        "KNOAH v0.4 · Powered by Claude</div>",
-        unsafe_allow_html=True,
-    )
+    st.markdown("<div style='text-align:center;color:#55556a;font-size:11px'>KNOAH v1.0 · Powered by Claude</div>", unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════════
 # MAIN
 # ══════════════════════════════════════════════════
-st.markdown("# 📊 KNOAH Trading Analysis")
+st.markdown("# KNOAH Trading Analysis")
 
-# ── 상태 바 + AI 분석 버튼 ───────────────────────
+has_data = not st.session_state.trades.empty
 conn_names = connected_exchanges()
 badges = " ".join(f'<span class="badge badge-success">{n}</span>' for n in conn_names) if conn_names else '<span class="badge badge-info">DEMO</span>'
-has_data = not st.session_state.trades.empty
 n_ex = int(st.session_state.trades["exchange"].nunique()) if has_data and "exchange" in st.session_state.trades.columns else 0
+st.markdown(f'{badges} &nbsp; 거래소 **{n_ex}개** · 거래 **{len(st.session_state.trades)}건**', unsafe_allow_html=True)
 
-top_left, top_right = st.columns([4, 1])
-with top_left:
-    st.markdown(f'{badges} &nbsp; 거래소 **{n_ex}개** · 거래 **{len(st.session_state.trades)}건**', unsafe_allow_html=True)
-with top_right:
-    def _run_ai():
-        _df = st.session_state.trades.copy()
-        _agg = aggregate_data(_df, st.session_state.deposits, "통합")
-        _key = st.session_state.get("api_key_claude", "")
-        if not _key:
-            st.session_state.ai_comments = generate_dummy_comments(_agg)
-        else:
-            try:
-                st.session_state.ai_comments = call_claude_sections(_agg, _key)
-            except Exception:
-                st.session_state.ai_comments = generate_dummy_comments(_agg)
-
-    st.button(
-        "AI 분석",
-        use_container_width=True,
-        type="primary",
-        disabled=not has_data,
-        key="btn_ai_analyze",
-        on_click=_run_ai,
-    )
-
-# ── 거래소 필터 ──────────────────────────────────
-avail_ex = sorted(st.session_state.trades["exchange"].unique().tolist()) if has_data and "exchange" in st.session_state.trades.columns else []
-if len(avail_ex) > 1:
-    selected_ex = st.multiselect("📊 분석 대상", avail_ex, default=avail_ex, key="gf")
-else:
-    selected_ex = avail_ex
-
-
-def filtered_trades() -> pd.DataFrame:
-    df = st.session_state.trades
-    if df.empty or not selected_ex:
-        return df
-    if "exchange" in df.columns:
-        return df[df["exchange"].isin(selected_ex)]
-    return df
-
-
-# ── 데이터 없으면 안내 ───────────────────────────
 if not has_data:
-    st.markdown("---")
     st.info("👈 사이드바에서 거래소를 연결하거나 더미 데이터를 생성해주세요.")
     st.stop()
 
+# ── 거래소 필터 ──────────────────────────────────
+avail_ex = sorted(st.session_state.trades["exchange"].unique().tolist()) if "exchange" in st.session_state.trades.columns else []
+if len(avail_ex) > 1:
+    selected_ex = st.multiselect("분석 대상", avail_ex, default=avail_ex, key="gf")
+else:
+    selected_ex = avail_ex
+
+def filtered_trades():
+    d = st.session_state.trades
+    if d.empty or not selected_ex: return d
+    if "exchange" in d.columns: return d[d["exchange"].isin(selected_ex)]
+    return d
+
 df = filtered_trades().copy()
-if df.empty:
-    st.warning("선택된 거래소에 데이터가 없습니다.")
-    st.stop()
+if df.empty: st.warning("선택된 거래소에 데이터가 없습니다."); st.stop()
 
 df["datetime"] = pd.to_datetime(df["datetime"])
 df["net_pnl"] = df["pnl_usdt"] - df["fee_usdt"]
 
-# ── KNOAH 수익률 공식 ────────────────────────────
-# 순이익 = 현재자산 - 초기자산 - 총입금(초기제외) + 총출금
-# 수익률(%) = 순이익 ÷ (초기자산 + 총입금(초기제외)) × 100
-_dep_df = st.session_state.deposits
-_dep_all = _dep_df if not _dep_df.empty else pd.DataFrame(columns=["type", "amount_usdt", "exchange"])
-
-# 거래소별 초기 잔고 (첫 번째 DEPOSIT)
+# ── KNOAH 수익률 계산 ────────────────────────────
+_dep_all = st.session_state.deposits if not st.session_state.deposits.empty else pd.DataFrame(columns=["type", "amount_usdt", "exchange"])
 _ex_bal = {}
 if not _dep_all.empty and "exchange" in _dep_all.columns:
     for en, grp in _dep_all.groupby("exchange"):
         deps = grp[grp["type"] == "DEPOSIT"]["amount_usdt"]
         _ex_bal[en] = float(deps.iloc[0]) if len(deps) > 0 else 10_000
-init_bal_total = sum(_ex_bal.values()) if _ex_bal else 10_000  # 전체 초기 자산
+init_bal_total = sum(_ex_bal.values()) if _ex_bal else 10_000
 
-# 입출금 집계 (초기 입금 제외)
 _all_deposits = float(_dep_all[_dep_all["type"] == "DEPOSIT"]["amount_usdt"].sum()) if len(_dep_all) > 0 else 0
-_extra_deposits = _all_deposits - init_bal_total  # 초기 자산 이후 추가 입금
-_extra_deposits = max(_extra_deposits, 0)
+_extra_deposits = max(_all_deposits - init_bal_total, 0)
 _total_withdrawals = float(_dep_all[_dep_all["type"] == "WITHDRAWAL"]["amount_usdt"].sum()) if len(_dep_all) > 0 else 0
 
-# 현재 자산 = 거래소별 (초기잔고 + 누적PnL).clip(0) 합산
 _current_bal = 0
 for en in (df["exchange"].unique() if "exchange" in df.columns else ["default"]):
     eb = _ex_bal.get(en, 10_000)
-    if en == "default":
-        ex_pnl = float(df["net_pnl"].sum())
-    else:
-        ex_pnl = float(df[df["exchange"] == en]["net_pnl"].sum())
+    ex_pnl = float(df[df["exchange"] == en]["net_pnl"].sum()) if en != "default" else float(df["net_pnl"].sum())
     _current_bal += max(0, eb + ex_pnl)
 
-# KNOAH 공식 적용
 net_profit = _current_bal - init_bal_total - _extra_deposits + _total_withdrawals
 roi_denom = init_bal_total + _extra_deposits
 roi = (net_profit / roi_denom * 100) if roi_denom > 0 else 0
-
-total_pnl = net_profit
 win_count = len(df[df["pnl_usdt"] > 0])
 win_rate = win_count / len(df) * 100
 total_fee = float(df["fee_usdt"].sum())
 avg_lev = float(df["leverage"].mean())
-
-
-# ══════════════════════════════════════════════════
-# HERO: 현재 잔고 + 수익률
-# ══════════════════════════════════════════════════
 _roi_color = _C["profit"] if roi >= 0 else _C["loss"]
 _pnl_sign = "+" if net_profit >= 0 else ""
 
-# ══════════════════════════════════════════════════
-# HERO: 현재 잔고 + 수익률 (가운데 정렬, 강조)
-# ══════════════════════════════════════════════════
-st.markdown(f"""
-<div style="text-align:center; margin:28px 0 32px 0;">
-  <div style="font-size:11px; color:#55556a; text-transform:uppercase; letter-spacing:2px; margin-bottom:8px;">Current Balance</div>
-  <div style="font-size:48px; font-family:JetBrains Mono; font-weight:700; color:#e8e8ed; line-height:1.1;">
-    ${_current_bal:,.2f}
-  </div>
-  <div style="margin-top:12px; display:inline-flex; gap:32px; align-items:baseline;">
-    <div>
-      <span style="font-size:11px; color:#55556a; text-transform:uppercase; letter-spacing:1px;">ROI</span>
-      <span style="font-size:32px; font-family:JetBrains Mono; font-weight:700; color:{_roi_color}; margin-left:8px;">
-        {roi:+.2f}%
-      </span>
-    </div>
-    <div>
-      <span style="font-size:11px; color:#55556a; text-transform:uppercase; letter-spacing:1px;">P&L</span>
-      <span style="font-size:24px; font-family:JetBrains Mono; font-weight:600; color:{_roi_color}; margin-left:8px;">
-        {_pnl_sign}${net_profit:,.2f}
-      </span>
-    </div>
-  </div>
-</div>
-""", unsafe_allow_html=True)
-
-
-# ══════════════════════════════════════════════════
-# SECTION: 자산 곡선
-# ══════════════════════════════════════════════════
-st.markdown('<div class="section-hdr">자산 곡선</div>', unsafe_allow_html=True)
-render_ai("equity_curve")
-
+# ── Equity 계산 ──────────────────────────────────
 multi_ex = "exchange" in df.columns and df["exchange"].nunique() > 1
-
-# 거래소별 equity 각각 계산 후 합산 (잔고 0 바닥 개별 적용)
 if multi_ex:
-    _ex_equity_frames = []
+    _frames = []
     for en, grp in df.groupby("exchange"):
         g = grp.sort_values("datetime").copy()
         eb = _ex_bal.get(en, 10_000)
         g["ex_equity"] = (eb + g["net_pnl"].cumsum()).clip(lower=0)
-        g["ex_roi"] = ((g["ex_equity"] / eb) - 1) * 100
-        g["_ex_bal"] = eb
-        _ex_equity_frames.append(g[["datetime", "exchange", "net_pnl", "symbol", "side", "ex_equity", "ex_roi", "_ex_bal"]])
-    _all_eq = pd.concat(_ex_equity_frames).sort_values("datetime")
-    ds = _all_eq.copy()
-    _pivot = _all_eq.pivot_table(index="datetime", columns="exchange", values="ex_equity", aggfunc="last")
-    _pivot = _pivot.ffill().fillna(method="bfill")
+        _frames.append(g[["datetime", "exchange", "net_pnl", "symbol", "side", "ex_equity"]])
+    _all_eq = pd.concat(_frames).sort_values("datetime")
+    _pivot = _all_eq.pivot_table(index="datetime", columns="exchange", values="ex_equity", aggfunc="last").ffill().bfill()
     _pivot["total"] = _pivot.sum(axis=1)
     _total_init = sum(_ex_bal.get(en, 10_000) for en in df["exchange"].unique())
-    _pivot["total_roi"] = ((_pivot["total"] / _total_init) - 1) * 100
-    ds = ds.merge(_pivot[["total", "total_roi"]].reset_index(), on="datetime", how="left")
+    ds = _all_eq.merge(_pivot[["total"]].reset_index(), on="datetime", how="left")
     ds["equity"] = ds["total"]
-    ds["roi_pct"] = ds["total_roi"]
 else:
     ds = df.sort_values("datetime").copy()
     eb = list(_ex_bal.values())[0] if _ex_bal else init_bal_total
     ds["equity"] = (eb + ds["net_pnl"].cumsum()).clip(lower=0)
-    ds["roi_pct"] = ((ds["equity"] / eb) - 1) * 100
-    ds["ex_equity"] = ds["equity"]
     _total_init = eb
 
-fig_eq = go.Figure()
-fig_eq.add_trace(go.Scatter(
-    x=ds["datetime"], y=ds["equity"], mode="lines",
-    name="통합" if multi_ex else "자산",
-    line=dict(color=_C["primary"], width=2.5),
-    fill="tozeroy", fillcolor="rgba(107,138,255,0.06)",
-))
-if multi_ex:
-    for en, grp in _all_eq.groupby("exchange"):
-        fig_eq.add_trace(go.Scatter(
-            x=grp["datetime"], y=grp["ex_equity"], mode="lines", name=en,
-            line=dict(color=_EX_COLOR.get(en, "#888"), width=1.5, dash="dot"),
-        ))
-_ref_bal = _total_init if multi_ex else (list(_ex_bal.values())[0] if _ex_bal else init_bal_total)
-fig_eq.add_hline(y=_ref_bal, line_dash="dash", line_color="#4a4a6a", line_width=1,
-                 annotation_text="초기 잔고", annotation_font_color="#7b7b9e")
-fig_eq.update_layout(**{**_CHART, "height": 380}, xaxis_title="", yaxis_title="USDT",
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
-st.plotly_chart(fig_eq, use_container_width=True)
+
+# ══════════════════════════════════════════════════
+# TABS: 대시보드 | AI Report
+# ══════════════════════════════════════════════════
+tab_dashboard, tab_ai = st.tabs(["대시보드", "AI Report"])
 
 
 # ══════════════════════════════════════════════════
-# SECTION: 핵심 지표
+# TAB 1: 대시보드
 # ══════════════════════════════════════════════════
-st.markdown('<div class="section-hdr">핵심 지표</div>', unsafe_allow_html=True)
-render_ai("overview")
+with tab_dashboard:
+    # ── Hero ──────────────────────────────────────
+    st.markdown(f"""
+    <div style="text-align:center; margin:20px 0 28px 0;">
+      <div style="font-size:11px; color:#55556a; text-transform:uppercase; letter-spacing:2px; margin-bottom:6px;">Current Balance</div>
+      <div style="font-size:48px; font-family:JetBrains Mono; font-weight:700; color:#e8e8ed; line-height:1.1;">${_current_bal:,.2f}</div>
+      <div style="margin-top:10px; display:inline-flex; gap:32px; align-items:baseline;">
+        <div><span style="font-size:11px; color:#55556a; letter-spacing:1px;">ROI</span>
+          <span style="font-size:32px; font-family:JetBrains Mono; font-weight:700; color:{_roi_color}; margin-left:8px;">{roi:+.2f}%</span></div>
+        <div><span style="font-size:11px; color:#55556a; letter-spacing:1px;">P&L</span>
+          <span style="font-size:24px; font-family:JetBrains Mono; font-weight:600; color:{_roi_color}; margin-left:8px;">{_pnl_sign}${net_profit:,.2f}</span></div>
+      </div>
+    </div>""", unsafe_allow_html=True)
 
-_avg_win = float(df[df["pnl_usdt"] > 0]["net_pnl"].mean()) if win_count > 0 else 0
-_avg_loss = float(df[df["pnl_usdt"] <= 0]["net_pnl"].mean()) if len(df) - win_count > 0 else 0
-_pf = round(abs(float(df[df["net_pnl"] > 0]["net_pnl"].sum())) / max(abs(float(df[df["net_pnl"] <= 0]["net_pnl"].sum())), 1), 2)
+    # ── 자산 곡선 ────────────────────────────────
+    st.markdown('<div class="section-hdr">자산 곡선</div>', unsafe_allow_html=True)
+    fig_eq = go.Figure()
+    fig_eq.add_trace(go.Scatter(x=ds["datetime"], y=ds["equity"], mode="lines", name="통합" if multi_ex else "자산",
+        line=dict(color=_C["primary"], width=2.5), fill="tozeroy", fillcolor="rgba(107,138,255,0.06)"))
+    if multi_ex:
+        for en, grp in _all_eq.groupby("exchange"):
+            fig_eq.add_trace(go.Scatter(x=grp["datetime"], y=grp["ex_equity"], mode="lines", name=en,
+                line=dict(color=_EX_COLOR.get(en, "#888"), width=1.5, dash="dot")))
+    _ref_bal = _total_init if multi_ex else (list(_ex_bal.values())[0] if _ex_bal else init_bal_total)
+    fig_eq.add_hline(y=_ref_bal, line_dash="dash", line_color="#4a4a6a", line_width=1, annotation_text="초기 잔고", annotation_font_color="#7b7b9e")
+    fig_eq.update_layout(**{**_CHART, "height": 380}, xaxis_title="", yaxis_title="USDT",
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+    st.plotly_chart(fig_eq, use_container_width=True)
 
-_r1c1, _r1c2, _r1c3, _r1c4 = st.columns(4)
-_r1c1.metric("총 거래", f"{len(df)}건")
-_r1c2.metric("승률", f"{win_rate:.1f}%")
-_r1c3.metric("평균 수익", f"${_avg_win:,.2f}")
-_r1c4.metric("평균 손실", f"${_avg_loss:,.2f}")
-_r2c1, _r2c2, _r2c3, _r2c4 = st.columns(4)
-_r2c1.metric("수익 팩터", f"{_pf}")
-_r2c2.metric("평균 레버리지", f"{avg_lev:.1f}x")
-_r2c3.metric("총 수수료", f"${total_fee:,.2f}")
-_peak = ds["equity"].cummax()
-_mdd_pct = float((ds["equity"] - _peak).min() / _peak.max() * 100) if _peak.max() > 0 else 0
-_r2c4.metric("MDD", f"{_mdd_pct:.1f}%")
+    # ── 핵심 지표 ────────────────────────────────
+    st.markdown('<div class="section-hdr">핵심 지표</div>', unsafe_allow_html=True)
+    _avg_win = float(df[df["pnl_usdt"] > 0]["net_pnl"].mean()) if win_count > 0 else 0
+    _avg_loss = float(df[df["pnl_usdt"] <= 0]["net_pnl"].mean()) if len(df) - win_count > 0 else 0
+    _pf = round(abs(float(df[df["net_pnl"] > 0]["net_pnl"].sum())) / max(abs(float(df[df["net_pnl"] <= 0]["net_pnl"].sum())), 1), 2)
+    _peak = ds["equity"].cummax()
+    _mdd_pct = float((ds["equity"] - _peak).min() / _peak.max() * 100) if _peak.max() > 0 else 0
 
+    r1 = st.columns(4)
+    r1[0].metric("총 거래", f"{len(df)}건"); r1[1].metric("승률", f"{win_rate:.1f}%")
+    r1[2].metric("평균 수익", f"${_avg_win:,.2f}"); r1[3].metric("평균 손실", f"${_avg_loss:,.2f}")
+    r2 = st.columns(4)
+    r2[0].metric("수익 팩터", f"{_pf}"); r2[1].metric("평균 레버리지", f"{avg_lev:.1f}x")
+    r2[2].metric("총 수수료", f"${total_fee:,.2f}"); r2[3].metric("MDD", f"{_mdd_pct:.1f}%")
 
-# ── 거래소별 성과 카드 ───────────────────────────
-if "exchange" in df.columns and df["exchange"].nunique() > 1:
-    st.markdown('<div class="section-hdr">거래소별 성과</div>', unsafe_allow_html=True)
-    render_ai("exchange_comparison")
-    ex_cols = st.columns(df["exchange"].nunique())
-    for i, (en, grp) in enumerate(df.groupby("exchange")):
-        with ex_cols[i]:
-            eb = _ex_bal.get(en, 10_000)
-            ex_current = max(0, eb + float(grp["net_pnl"].sum()))
-            ep = ex_current - eb
-            ew = len(grp[grp["pnl_usdt"] > 0]) / len(grp) * 100
-            ex_roi = (ep / eb * 100) if eb > 0 else 0
-            color = _EX_COLOR.get(en, "#6b8aff")
-            pnl_color = _C["profit"] if ep >= 0 else _C["loss"]
-            _ep_sign = "+" if ep >= 0 else ""
-            st.markdown(
-                f'<div style="border-left:3px solid {color};padding:10px 14px;'
-                f'background:rgba(255,255,255,0.02);border-radius:0 10px 10px 0;margin-bottom:8px">'
-                f'<div style="font-size:13px;color:#7b7b9e;font-weight:600">{en}</div>'
-                f'<div style="font-size:22px;font-family:JetBrains Mono;color:{pnl_color};font-weight:700">'
-                f'${ex_current:,.2f}</div>'
-                f'<div style="font-size:14px;font-family:JetBrains Mono;color:{pnl_color}">'
-                f'{ex_roi:+.2f}% ({_ep_sign}${abs(ep):,.2f})</div>'
-                f'<div style="font-size:12px;color:#7b7b9e;margin-top:4px">'
-                f'초기 ${eb:,.0f} · {len(grp)}건 · 승률 {ew:.1f}%</div>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
-elif "exchange" in df.columns:
-    render_ai("exchange_comparison")
+    # ── 거래소별 성과 ────────────────────────────
+    if multi_ex:
+        st.markdown('<div class="section-hdr">거래소별 성과</div>', unsafe_allow_html=True)
+        ex_cols = st.columns(df["exchange"].nunique())
+        for i, (en, grp) in enumerate(df.groupby("exchange")):
+            with ex_cols[i]:
+                eb = _ex_bal.get(en, 10_000)
+                ex_current = max(0, eb + float(grp["net_pnl"].sum()))
+                ep = ex_current - eb
+                ew = len(grp[grp["pnl_usdt"] > 0]) / len(grp) * 100
+                ex_roi = (ep / eb * 100) if eb > 0 else 0
+                color = _EX_COLOR.get(en, "#6b8aff")
+                pc = _C["profit"] if ep >= 0 else _C["loss"]
+                eps = "+" if ep >= 0 else ""
+                st.markdown(
+                    f'<div style="border-left:3px solid {color};padding:10px 14px;background:rgba(255,255,255,0.02);border-radius:0 10px 10px 0">'
+                    f'<div style="font-size:13px;color:#7b7b9e;font-weight:600">{en}</div>'
+                    f'<div style="font-size:22px;font-family:JetBrains Mono;color:{pc};font-weight:700">${ex_current:,.2f}</div>'
+                    f'<div style="font-size:14px;font-family:JetBrains Mono;color:{pc}">{ex_roi:+.2f}% ({eps}${abs(ep):,.2f})</div>'
+                    f'<div style="font-size:12px;color:#7b7b9e;margin-top:4px">초기 ${eb:,.0f} · {len(grp)}건 · 승률 {ew:.1f}%</div></div>',
+                    unsafe_allow_html=True)
 
+    # ── 종목별 차트 ──────────────────────────────
+    col_l, col_r = st.columns(2)
+    with col_l:
+        st.markdown('<div class="section-hdr">종목별 손익</div>', unsafe_allow_html=True)
+        sp = df.groupby("symbol")["net_pnl"].sum().sort_values()
+        fig_s = go.Figure(go.Bar(x=sp.values, y=sp.index, orientation="h",
+            marker_color=[_C["profit"] if v >= 0 else _C["loss"] for v in sp.values],
+            text=[f"${v:+,.0f}" for v in sp.values], textposition="auto", textfont=dict(size=11)))
+        fig_s.update_layout(**_CHART, xaxis_title="USDT", yaxis_title="")
+        st.plotly_chart(fig_s, use_container_width=True)
+    with col_r:
+        st.markdown('<div class="section-hdr">종목별 승률</div>', unsafe_allow_html=True)
+        ss = df.groupby("symbol").apply(lambda g: pd.Series({"wr": len(g[g["pnl_usdt"] > 0]) / len(g) * 100, "n": len(g)})).sort_values("wr")
+        fig_w = go.Figure(go.Bar(x=ss["wr"], y=ss.index, orientation="h",
+            marker_color=[_C["profit"] if v >= 50 else _C["loss"] for v in ss["wr"]],
+            text=[f"{v:.0f}% ({int(n)}건)" for v, n in zip(ss["wr"], ss["n"])], textposition="auto", textfont=dict(size=11)))
+        fig_w.add_vline(x=50, line_dash="dash", line_color="#4a4a6a")
+        fig_w.update_layout(**_CHART, xaxis_title="%", yaxis_title="")
+        st.plotly_chart(fig_w, use_container_width=True)
 
-# ══════════════════════════════════════════════════
-# SECTION: 종목별
-# ══════════════════════════════════════════════════
-col_l, col_r = st.columns(2)
+    # ── 시간 패턴 ────────────────────────────────
+    col_l2, col_r2 = st.columns(2)
+    with col_l2:
+        st.markdown('<div class="section-hdr">요일별 손익</div>', unsafe_allow_html=True)
+        df["weekday"] = df["datetime"].dt.day_name()
+        d_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        d_pnl = df.groupby("weekday")["net_pnl"].sum().reindex(d_order, fill_value=0)
+        fig_d = go.Figure(go.Bar(x=["Mon","Tue","Wed","Thu","Fri","Sat","Sun"], y=d_pnl.values,
+            marker_color=[_C["profit"] if v >= 0 else _C["loss"] for v in d_pnl.values],
+            text=[f"${v:+,.0f}" for v in d_pnl.values], textposition="outside", textfont=dict(size=10)))
+        fig_d.update_layout(**_CHART, xaxis_title="", yaxis_title="USDT")
+        st.plotly_chart(fig_d, use_container_width=True)
+    with col_r2:
+        st.markdown('<div class="section-hdr">시간대별 거래 (KST)</div>', unsafe_allow_html=True)
+        df["hour_kst"] = (df["datetime"].dt.hour + 9) % 24
+        hc = df.groupby("hour_kst").size().reindex(range(24), fill_value=0)
+        hp = df.groupby("hour_kst")["net_pnl"].sum().reindex(range(24), fill_value=0)
+        fig_h = go.Figure()
+        fig_h.add_trace(go.Bar(x=list(range(24)), y=hc.values, name="거래수", marker_color=_C["neutral"]))
+        fig_h.add_trace(go.Scatter(x=list(range(24)), y=hp.values, name="PnL", mode="lines+markers",
+            line=dict(color=_C["primary"], width=2), marker=dict(size=4), yaxis="y2"))
+        fig_h.update_layout(**_CHART, yaxis=dict(title="거래수", side="left"), yaxis2=dict(title="PnL", side="right", overlaying="y"),
+            xaxis_title="시간 (KST)", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), barmode="overlay")
+        st.plotly_chart(fig_h, use_container_width=True)
 
-with col_l:
-    st.markdown('<div class="section-hdr">종목별 손익</div>', unsafe_allow_html=True)
-    render_ai("symbol_pnl")
-    sp = df.groupby("symbol")["net_pnl"].sum().sort_values()
-    fig_s = go.Figure(go.Bar(
-        x=sp.values, y=sp.index, orientation="h",
-        marker_color=[_C["profit"] if v >= 0 else _C["loss"] for v in sp.values],
-        text=[f"${v:+,.0f}" for v in sp.values],
-        textposition="auto", textfont=dict(size=11),
-    ))
-    fig_s.update_layout(**_CHART, xaxis_title="USDT", yaxis_title="")
-    st.plotly_chart(fig_s, use_container_width=True)
+    # ── PnL 분포 ─────────────────────────────────
+    st.markdown('<div class="section-hdr">개별 거래 PnL 분포</div>', unsafe_allow_html=True)
+    _pnl_vals = df["net_pnl"].values
+    _bin_size = max((float(_pnl_vals.max()) - float(_pnl_vals.min())) / 40, 1)
+    _neg_edges = list(np.arange(0, float(_pnl_vals.min()) - _bin_size, -_bin_size))[::-1]
+    _pos_edges = list(np.arange(0, float(_pnl_vals.max()) + _bin_size, _bin_size))
+    _edges = sorted(set(_neg_edges + _pos_edges))
+    _colors, _counts, _mids = [], [], []
+    for j in range(len(_edges) - 1):
+        lo, hi = _edges[j], _edges[j + 1]
+        mid = (lo + hi) / 2
+        _mids.append(mid); _counts.append(int(((df["net_pnl"] >= lo) & (df["net_pnl"] < hi)).sum()))
+        _colors.append(_C["profit"] if mid >= 0 else _C["loss"])
+    fig_hist = go.Figure(go.Bar(x=_mids, y=_counts, width=_bin_size * 0.9, marker_color=_colors, showlegend=False,
+        hovertemplate="PnL: %{x:,.0f}<br>빈도: %{y}<extra></extra>"))
+    fig_hist.update_layout(**_CHART, xaxis_title="PnL (USDT)", yaxis_title="빈도", bargap=0.05)
+    st.plotly_chart(fig_hist, use_container_width=True)
 
-with col_r:
-    st.markdown('<div class="section-hdr">종목별 승률</div>', unsafe_allow_html=True)
-    render_ai("symbol_winrate")
-    ss = df.groupby("symbol").apply(
-        lambda g: pd.Series({"wr": len(g[g["pnl_usdt"] > 0]) / len(g) * 100, "n": len(g)})
-    ).sort_values("wr")
-    fig_w = go.Figure(go.Bar(
-        x=ss["wr"], y=ss.index, orientation="h",
-        marker_color=[_C["profit"] if v >= 50 else _C["loss"] for v in ss["wr"]],
-        text=[f"{v:.0f}% ({int(n)}건)" for v, n in zip(ss["wr"], ss["n"])],
-        textposition="auto", textfont=dict(size=11),
-    ))
-    fig_w.add_vline(x=50, line_dash="dash", line_color="#4a4a6a")
-    fig_w.update_layout(**_CHART, xaxis_title="%", yaxis_title="")
-    st.plotly_chart(fig_w, use_container_width=True)
+    # ── 거래 내역 ────────────────────────────────
+    st.markdown('<div class="section-hdr">거래 내역</div>', unsafe_allow_html=True)
+    with st.expander(f"전체 거래 내역 ({len(df)}건)", expanded=False):
+        fdf = df.copy()
+        fdf["datetime"] = fdf["datetime"].astype(str)
+        st.dataframe(fdf.sort_values("datetime", ascending=False).reset_index(drop=True), use_container_width=True, height=420)
 
-
-# ══════════════════════════════════════════════════
-# SECTION: 시간 패턴
-# ══════════════════════════════════════════════════
-col_l2, col_r2 = st.columns(2)
-
-with col_l2:
-    st.markdown('<div class="section-hdr">요일별 손익</div>', unsafe_allow_html=True)
-    render_ai("weekday_pnl")
-    df["weekday"] = df["datetime"].dt.day_name()
-    d_order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-    d_pnl = df.groupby("weekday")["net_pnl"].sum().reindex(d_order, fill_value=0)
-    d_lbl = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-    fig_d = go.Figure(go.Bar(
-        x=d_lbl, y=d_pnl.values,
-        marker_color=[_C["profit"] if v >= 0 else _C["loss"] for v in d_pnl.values],
-        text=[f"${v:+,.0f}" for v in d_pnl.values],
-        textposition="outside", textfont=dict(size=10),
-    ))
-    fig_d.update_layout(**_CHART, xaxis_title="", yaxis_title="USDT")
-    st.plotly_chart(fig_d, use_container_width=True)
-
-with col_r2:
-    st.markdown('<div class="section-hdr">시간대별 거래 (KST)</div>', unsafe_allow_html=True)
-    render_ai("hourly_pattern")
-    df["hour_kst"] = (df["datetime"].dt.hour + 9) % 24  # UTC → KST
-    hc = df.groupby("hour_kst").size().reindex(range(24), fill_value=0)
-    hp = df.groupby("hour_kst")["net_pnl"].sum().reindex(range(24), fill_value=0)
-    fig_h = go.Figure()
-    fig_h.add_trace(go.Bar(x=list(range(24)), y=hc.values, name="거래수", marker_color=_C["neutral"]))
-    fig_h.add_trace(go.Scatter(
-        x=list(range(24)), y=hp.values, name="PnL", mode="lines+markers",
-        line=dict(color=_C["primary"], width=2), marker=dict(size=4), yaxis="y2",
-    ))
-    fig_h.update_layout(
-        **_CHART,
-        yaxis=dict(title="거래수", side="left"),
-        yaxis2=dict(title="PnL", side="right", overlaying="y"),
-        xaxis_title="시간 (KST)",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-        barmode="overlay",
-    )
-    st.plotly_chart(fig_h, use_container_width=True)
-
-
-# ══════════════════════════════════════════════════
-# SECTION: PnL 분포
-# ══════════════════════════════════════════════════
-st.markdown('<div class="section-hdr">개별 거래 PnL 분포</div>', unsafe_allow_html=True)
-render_ai("pnl_distribution")
-
-fig_hist = go.Figure()
-# 단일 히스토그램 + 색상으로 수익/손실 구분 (겹침 원천 차단)
-import numpy as _np
-_pnl = df["net_pnl"].values
-_bin_size = max((float(_pnl.max()) - float(_pnl.min())) / 40, 1)
-# 0을 경계로 bin edges 생성
-_neg_edges = list(_np.arange(0, float(_pnl.min()) - _bin_size, -_bin_size))[::-1]
-_pos_edges = list(_np.arange(0, float(_pnl.max()) + _bin_size, _bin_size))
-_edges = sorted(set(_neg_edges + _pos_edges))
-# 각 bin의 카운트와 색상 계산
-_colors, _counts, _mids = [], [], []
-for j in range(len(_edges) - 1):
-    lo, hi = _edges[j], _edges[j + 1]
-    mid = (lo + hi) / 2
-    cnt = int(((df["net_pnl"] >= lo) & (df["net_pnl"] < hi)).sum())
-    _mids.append(mid)
-    _counts.append(cnt)
-    _colors.append(_C["profit"] if mid >= 0 else _C["loss"])
-fig_hist.add_trace(go.Bar(
-    x=_mids, y=_counts, width=_bin_size * 0.9,
-    marker_color=_colors, showlegend=False,
-    hovertemplate="PnL: %{x:,.0f}<br>빈도: %{y}<extra></extra>",
-))
-fig_hist.update_layout(
-    **_CHART, xaxis_title="PnL (USDT)", yaxis_title="빈도", bargap=0.05,
-)
-st.plotly_chart(fig_hist, use_container_width=True)
+    with st.expander("수동 거래 추가", expanded=False):
+        with st.form("add_trade"):
+            r0 = st.columns(5)
+            with r0[0]: add_ex = st.selectbox("거래소", EXCHANGES, key="add_ex")
+            with r0[1]: add_dt = st.text_input("일시", value=datetime.now().strftime("%Y-%m-%d %H:%M"))
+            with r0[2]: add_sym = st.selectbox("종목", SYMBOLS, key="add_sym")
+            with r0[3]: add_side = st.selectbox("방향", SIDES, key="add_side")
+            with r0[4]: add_lev = st.number_input("레버리지", 1, 125, 10, key="add_lev")
+            r1 = st.columns(4)
+            with r1[0]: add_entry = st.number_input("진입가", min_value=0.0, value=85000.0, format="%.4f")
+            with r1[1]: add_exit = st.number_input("청산가", min_value=0.0, value=86000.0, format="%.4f")
+            with r1[2]: add_qty = st.number_input("수량(USDT)", min_value=1.0, value=500.0, format="%.2f")
+            with r1[3]: add_pnl = st.number_input("손익(USDT)", value=0.0, format="%.2f")
+            r2x = st.columns(4)
+            with r2x[0]: add_fee = st.number_input("수수료", min_value=0.0, value=1.0, format="%.2f")
+            with r2x[1]: add_hold = st.number_input("보유(분)", min_value=1, value=60)
+            with r2x[2]: add_type = st.selectbox("주문유형", ["MARKET", "LIMIT"], key="add_type")
+            with r2x[3]: add_sl = st.checkbox("스탑로스")
+            if st.form_submit_button("추가", use_container_width=True):
+                nid = st.session_state.trade_id_counter; st.session_state.trade_id_counter += 1
+                nr = pd.DataFrame([{"id": nid, "exchange": add_ex, "datetime": add_dt, "symbol": add_sym, "side": add_side,
+                    "leverage": int(add_lev), "entry_price": add_entry, "exit_price": add_exit, "quantity_usdt": add_qty,
+                    "pnl_usdt": add_pnl, "fee_usdt": add_fee, "holding_minutes": add_hold, "order_type": add_type, "stoploss_set": add_sl}])
+                st.session_state.trades = pd.concat([st.session_state.trades, nr], ignore_index=True)
+                st.success(f"#{nid} 추가!"); st.rerun()
 
 
 # ══════════════════════════════════════════════════
-# SECTION: 액션 아이템 (AI 분석 결과가 있을 때)
+# TAB 2: AI Report
 # ══════════════════════════════════════════════════
-actions = ai("action_items")
-if actions and isinstance(actions, list):
-    st.markdown("---")
-    items_html = "".join(f'<div class="ai-action-item">{item}</div>' for item in actions)
-    st.markdown(
-        f'<div class="ai-actions">'
-        f'<div class="ai-actions-title">🎯 AI 추천 액션 플랜</div>'
-        f'{items_html}'
-        f'<div style="font-size:11px;color:#666;margin-top:10px">'
-        f'⚠️ 본 분석은 투자 조언이 아니며, 매매 습관 개선을 위한 참고 자료입니다.</div>'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
+with tab_ai:
+    st.markdown("### AI Deep Report")
+    st.caption("Claude가 교차 분석 데이터를 기반으로 숨은 패턴, 심리 분석, 맞춤 전략을 제공합니다.")
 
+    if not api_key_claude:
+        st.warning("사이드바에서 Claude API Key를 입력해주세요.")
+    elif len(df) < 10:
+        st.warning("거래 데이터가 10건 미만입니다. 더 많은 데이터가 있으면 분석 정확도가 올라갑니다.")
 
-# ══════════════════════════════════════════════════
-# SECTION: 거래 내역 (토글)
-# ══════════════════════════════════════════════════
-st.markdown('<div class="section-hdr">거래 내역</div>', unsafe_allow_html=True)
+    def _run_deep_report():
+        _key = st.session_state.get("api_key_claude", "")
+        if not _key:
+            return
+        _df = st.session_state.trades.copy()
+        _deps = st.session_state.deposits
+        _basic = aggregate_data(_df, _deps, "통합")
+        _deep = aggregate_deep_data(_df, _deps)
+        try:
+            st.session_state.ai_deep_report = call_claude_deep_report(_basic, _deep, _key)
+        except Exception as e:
+            st.session_state.ai_deep_report = f"리포트 생성 실패: {e}"
 
-with st.expander(f"📋 전체 거래 내역 ({len(df)}건)", expanded=False):
-    fcol1, fcol2, fcol3, fcol4 = st.columns(4)
-    with fcol1:
-        ex_f = st.multiselect("거래소", sorted(df["exchange"].unique()) if "exchange" in df.columns else [], key="ex_f")
-    with fcol2:
-        sym_f = st.multiselect("종목", sorted(df["symbol"].unique()), key="sym_f")
-    with fcol3:
-        side_f = st.multiselect("방향", ["LONG", "SHORT"], key="side_f")
-    with fcol4:
-        pnl_f = st.selectbox("손익", ["전체", "수익만", "손실만"], key="pnl_f")
+    col_btn, col_info = st.columns([1, 3])
+    with col_btn:
+        st.button("리포트 생성", use_container_width=True, type="primary",
+                  disabled=not api_key_claude or len(df) < 1, key="btn_deep_report", on_click=_run_deep_report)
+    with col_info:
+        st.caption("Claude Sonnet 사용 · 약 10~15초 소요 · 교차 분석 + 심리 패턴 + 맞춤 전략")
 
-    fdf = df.copy()
-    if ex_f:
-        fdf = fdf[fdf["exchange"].isin(ex_f)]
-    if sym_f:
-        fdf = fdf[fdf["symbol"].isin(sym_f)]
-    if side_f:
-        fdf = fdf[fdf["side"].isin(side_f)]
-    if pnl_f == "수익만":
-        fdf = fdf[fdf["pnl_usdt"] > 0]
-    elif pnl_f == "손실만":
-        fdf = fdf[fdf["pnl_usdt"] <= 0]
-
-    fdf["datetime"] = fdf["datetime"].astype(str)
-    st.data_editor(
-        fdf.sort_values("datetime", ascending=False).reset_index(drop=True),
-        use_container_width=True, num_rows="fixed", height=420,
-        column_config={
-            "id": st.column_config.NumberColumn("ID", disabled=True, width="small"),
-            "exchange": st.column_config.TextColumn("거래소", disabled=True, width="small"),
-            "datetime": st.column_config.TextColumn("시간"),
-            "symbol": st.column_config.SelectboxColumn("종목", options=SYMBOLS),
-            "side": st.column_config.SelectboxColumn("방향", options=SIDES),
-            "leverage": st.column_config.NumberColumn("레버리지", format="%dx"),
-            "entry_price": st.column_config.NumberColumn("진입가", format="%.4f"),
-            "exit_price": st.column_config.NumberColumn("청산가", format="%.4f"),
-            "quantity_usdt": st.column_config.NumberColumn("수량", format="$%.2f"),
-            "pnl_usdt": st.column_config.NumberColumn("손익", format="$%.2f"),
-            "fee_usdt": st.column_config.NumberColumn("수수료", format="$%.2f"),
-            "holding_minutes": st.column_config.NumberColumn("보유(분)", format="%d분"),
-            "order_type": st.column_config.SelectboxColumn("유형", options=["MARKET", "LIMIT"]),
-            "stoploss_set": st.column_config.CheckboxColumn("SL"),
-        },
-        key="trade_editor",
-    )
-
-with st.expander("➕ 수동 거래 추가", expanded=False):
-    with st.form("add_trade"):
-        r0 = st.columns(5)
-        with r0[0]:
-            add_ex = st.selectbox("거래소", EXCHANGES, key="add_ex")
-        with r0[1]:
-            add_dt = st.text_input("일시", value=datetime.now().strftime("%Y-%m-%d %H:%M"))
-        with r0[2]:
-            add_sym = st.selectbox("종목", SYMBOLS, key="add_sym")
-        with r0[3]:
-            add_side = st.selectbox("방향", SIDES, key="add_side")
-        with r0[4]:
-            add_lev = st.number_input("레버리지", 1, 125, 10, key="add_lev")
-        r1 = st.columns(4)
-        with r1[0]:
-            add_entry = st.number_input("진입가", min_value=0.0, value=85000.0, format="%.4f")
-        with r1[1]:
-            add_exit = st.number_input("청산가", min_value=0.0, value=86000.0, format="%.4f")
-        with r1[2]:
-            add_qty = st.number_input("수량(USDT)", min_value=1.0, value=500.0, format="%.2f")
-        with r1[3]:
-            add_pnl = st.number_input("손익(USDT)", value=0.0, format="%.2f")
-        r2 = st.columns(4)
-        with r2[0]:
-            add_fee = st.number_input("수수료", min_value=0.0, value=1.0, format="%.2f")
-        with r2[1]:
-            add_hold = st.number_input("보유(분)", min_value=1, value=60)
-        with r2[2]:
-            add_type = st.selectbox("주문유형", ["MARKET", "LIMIT"], key="add_type")
-        with r2[3]:
-            add_sl = st.checkbox("스탑로스")
-        if st.form_submit_button("추가", use_container_width=True):
-            nid = st.session_state.trade_id_counter
-            st.session_state.trade_id_counter += 1
-            nr = pd.DataFrame([{
-                "id": nid, "exchange": add_ex, "datetime": add_dt,
-                "symbol": add_sym, "side": add_side, "leverage": int(add_lev),
-                "entry_price": add_entry, "exit_price": add_exit,
-                "quantity_usdt": add_qty, "pnl_usdt": add_pnl,
-                "fee_usdt": add_fee, "holding_minutes": add_hold,
-                "order_type": add_type, "stoploss_set": add_sl,
-            }])
-            st.session_state.trades = pd.concat([st.session_state.trades, nr], ignore_index=True)
-            st.success(f"#{nid} 추가!")
-            st.rerun()
+    if st.session_state.ai_deep_report:
+        safe = st.session_state.ai_deep_report.replace("$", "\\$")
+        st.markdown(f'<div class="deep-report">{""}</div>', unsafe_allow_html=True)
+        st.markdown(safe)
+        st.divider()
+        st.download_button("리포트 다운로드 (.md)", data=st.session_state.ai_deep_report,
+            file_name=f"knoah_deep_report_{datetime.now().strftime('%Y%m%d_%H%M')}.md", mime="text/markdown", use_container_width=True)
