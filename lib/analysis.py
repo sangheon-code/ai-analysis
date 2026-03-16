@@ -193,8 +193,8 @@ def aggregate_deep_data(trades: pd.DataFrame, deposits: pd.DataFrame) -> dict:
     result["leverage_bands"] = lev_stats
 
     # ── 5. 보유 시간별 성과 ──────────────────────────
-    df["hold_band"] = pd.cut(df["holding_minutes"], bins=[0, 10, 60, 360, 99999],
-                             labels=["스캘핑(<10분)", "단타(10-60분)", "스윙(1-6시간)", "장기(6시간+)"])
+    df["hold_band"] = pd.cut(df["holding_minutes"], bins=[0, 5, 30, 240, 1440, 99999],
+                             labels=["초단타(<5분)", "단타(5-30분)", "데이트레이딩(30분-4시간)", "스윙(4-24시간)", "장기(1일+)"])
     hold_stats = []
     for band, grp in df.groupby("hold_band", observed=True):
         if len(grp) < 2:
