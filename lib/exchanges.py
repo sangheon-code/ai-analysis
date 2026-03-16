@@ -42,14 +42,14 @@ def create_exchange(name: str, api_key: str, api_secret: str,
     exchange_class = getattr(ccxt, ccxt_id)
 
     config = {
-        "apiKey": api_key,
-        "secret": api_secret,
+        "apiKey": api_key or "",
+        "secret": api_secret or "",
         "enableRateLimit": True,
         "options": {"defaultType": "swap"},  # USDT-M 선물
     }
 
-    if passphrase and name in NEEDS_PASSPHRASE:
-        config["password"] = passphrase
+    if name in NEEDS_PASSPHRASE:
+        config["password"] = passphrase or ""
 
     # 거래소별 추가 설정
     if name == "Binance":
