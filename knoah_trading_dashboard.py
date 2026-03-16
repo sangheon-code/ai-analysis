@@ -19,7 +19,7 @@ from lib.config import (
     CUSTOM_CSS, TRADE_COLUMNS, DEPOSIT_COLUMNS,
 )
 from lib.dummy import generate_trades, generate_deposits
-from lib.analysis import aggregate_data, aggregate_deep_data, call_claude_deep_report
+from lib.analysis import aggregate_data, aggregate_deep_data, call_claude_deep_report, get_api_balance
 
 try:
     from lib.exchanges import (
@@ -496,16 +496,31 @@ with tab_ai:
         _basic = aggregate_data(_df, _deps, "통합")
         _deep = aggregate_deep_data(_df, _deps)
         try:
-            st.session_state.ai_deep_report = call_claude_deep_report(_basic, _deep, _key)
+            result = call_claude_deep_report(_basic, _deep, _key)
+            st.session_state.ai_deep_report = result["report"]
+            st.session_state.ai_last_cost = result
         except Exception as e:
             st.session_state.ai_deep_report = f"리포트 생성 실패: {e}"
+            st.session_state.ai_last_cost = None
+
+    # API 잔고 조회
+    _balance_info = None
+    if api_key_claude:
+        _balance_info = get_api_balance(api_key_claude)
 
     col_btn, col_info = st.columns([1, 3])
     with col_btn:
         st.button("리포트 생성", use_container_width=True, type="primary",
                   disabled=not api_key_claude or len(df) < 1, key="btn_deep_report", on_click=_run_deep_report)
     with col_info:
-        st.caption("Claude Sonnet 사용 · 약 10~15초 소요 · 교차 분석 + 심리 패턴 + 맞춤 전략")
+        info_parts = ["Claude Sonnet · 약 10~15초 소요"]
+        if _balance_info and _balance_info["ok"]:
+            info_parts.append(f"잔고: {_balance_info['balance']}")
+        info_parts.append("회당 약 \\$0.01~0.05")
+        last = st.session_state.get("ai_last_cost")
+        if last and isinstance(last, dict):
+            info_parts.append(f"마지막: {last['input_tokens']+last['output_tokens']:,}토큰 \\${last['cost_usd']:.4f}")
+        st.caption(" · ".join(info_parts))
 
     if st.session_state.ai_deep_report:
         safe = st.session_state.ai_deep_report.replace("$", "\\$")

@@ -353,4 +353,34 @@ def call_claude_deep_report(basic_stats: dict, deep_data: dict, api_key: str) ->
         system=DEEP_REPORT_PROMPT,
         messages=[{"role": "user", "content": user_prompt}],
     )
-    return message.content[0].text
+
+    # 사용량 추적
+    usage = message.usage
+    input_tokens = usage.input_tokens
+    output_tokens = usage.output_tokens
+    # Sonnet 4: input $3/MTok, output $15/MTok
+    cost = input_tokens * 3 / 1_000_000 + output_tokens * 15 / 1_000_000
+
+    return {
+        "report": message.content[0].text,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cost_usd": round(cost, 4),
+    }
+
+
+def get_api_balance(api_key: str) -> dict:
+    """Anthropic API 크레딧 잔고 조회"""
+    import requests
+    try:
+        # Admin API로 잔고 조회 시도
+        headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01"}
+        # billing endpoint는 admin key만 가능, 일반 key는 실패할 수 있음
+        resp = requests.get("https://api.anthropic.com/v1/billing/credit_balance",
+                           headers=headers, timeout=5)
+        if resp.status_code == 200:
+            data = resp.json()
+            return {"ok": True, "balance": data.get("balance", data)}
+    except Exception:
+        pass
+    return {"ok": False}
