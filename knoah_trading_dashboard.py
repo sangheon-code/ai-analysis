@@ -430,28 +430,88 @@ avg_lev = float(df["leverage"].mean())
 _roi_color = _C["profit"] if roi >= 0 else _C["loss"]
 _pnl_sign = "+" if net_profit >= 0 else ""
 
+# ══════════════════════════════════════════════════
+# HERO: 현재 잔고 + 수익률 (가운데 정렬, 강조)
+# ══════════════════════════════════════════════════
 st.markdown(f"""
-<div style="display:flex; gap:24px; align-items:flex-end; margin:20px 0 28px 0;">
-  <div>
-    <div style="font-size:12px; color:#7b7b9e; text-transform:uppercase; letter-spacing:1px; margin-bottom:4px;">현재 잔고</div>
-    <div style="font-size:36px; font-family:JetBrains Mono; font-weight:700; color:#e8e8ed;">
-      ${_current_bal:,.2f}
-    </div>
+<div style="text-align:center; margin:28px 0 32px 0;">
+  <div style="font-size:11px; color:#55556a; text-transform:uppercase; letter-spacing:2px; margin-bottom:8px;">Current Balance</div>
+  <div style="font-size:48px; font-family:JetBrains Mono; font-weight:700; color:#e8e8ed; line-height:1.1;">
+    ${_current_bal:,.2f}
   </div>
-  <div>
-    <div style="font-size:12px; color:#7b7b9e; text-transform:uppercase; letter-spacing:1px; margin-bottom:4px;">수익률</div>
-    <div style="font-size:36px; font-family:JetBrains Mono; font-weight:700; color:{_roi_color};">
-      {roi:+.2f}%
+  <div style="margin-top:12px; display:inline-flex; gap:32px; align-items:baseline;">
+    <div>
+      <span style="font-size:11px; color:#55556a; text-transform:uppercase; letter-spacing:1px;">ROI</span>
+      <span style="font-size:32px; font-family:JetBrains Mono; font-weight:700; color:{_roi_color}; margin-left:8px;">
+        {roi:+.2f}%
+      </span>
     </div>
-  </div>
-  <div style="padding-bottom:6px;">
-    <span style="font-size:14px; color:#7b7b9e;">순이익</span>
-    <span style="font-size:18px; font-family:JetBrains Mono; font-weight:600; color:{_roi_color}; margin-left:8px;">
-      {_pnl_sign}${net_profit:,.2f}
-    </span>
+    <div>
+      <span style="font-size:11px; color:#55556a; text-transform:uppercase; letter-spacing:1px;">P&L</span>
+      <span style="font-size:24px; font-family:JetBrains Mono; font-weight:600; color:{_roi_color}; margin-left:8px;">
+        {_pnl_sign}${net_profit:,.2f}
+      </span>
+    </div>
   </div>
 </div>
 """, unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════
+# SECTION: 자산 곡선
+# ══════════════════════════════════════════════════
+st.markdown('<div class="section-hdr">자산 곡선</div>', unsafe_allow_html=True)
+render_ai("equity_curve")
+
+multi_ex = "exchange" in df.columns and df["exchange"].nunique() > 1
+
+# 거래소별 equity 각각 계산 후 합산 (잔고 0 바닥 개별 적용)
+if multi_ex:
+    _ex_equity_frames = []
+    for en, grp in df.groupby("exchange"):
+        g = grp.sort_values("datetime").copy()
+        eb = _ex_bal.get(en, 10_000)
+        g["ex_equity"] = (eb + g["net_pnl"].cumsum()).clip(lower=0)
+        g["ex_roi"] = ((g["ex_equity"] / eb) - 1) * 100
+        g["_ex_bal"] = eb
+        _ex_equity_frames.append(g[["datetime", "exchange", "net_pnl", "symbol", "side", "ex_equity", "ex_roi", "_ex_bal"]])
+    _all_eq = pd.concat(_ex_equity_frames).sort_values("datetime")
+    ds = _all_eq.copy()
+    _pivot = _all_eq.pivot_table(index="datetime", columns="exchange", values="ex_equity", aggfunc="last")
+    _pivot = _pivot.ffill().fillna(method="bfill")
+    _pivot["total"] = _pivot.sum(axis=1)
+    _total_init = sum(_ex_bal.get(en, 10_000) for en in df["exchange"].unique())
+    _pivot["total_roi"] = ((_pivot["total"] / _total_init) - 1) * 100
+    ds = ds.merge(_pivot[["total", "total_roi"]].reset_index(), on="datetime", how="left")
+    ds["equity"] = ds["total"]
+    ds["roi_pct"] = ds["total_roi"]
+else:
+    ds = df.sort_values("datetime").copy()
+    eb = list(_ex_bal.values())[0] if _ex_bal else init_bal_total
+    ds["equity"] = (eb + ds["net_pnl"].cumsum()).clip(lower=0)
+    ds["roi_pct"] = ((ds["equity"] / eb) - 1) * 100
+    ds["ex_equity"] = ds["equity"]
+    _total_init = eb
+
+fig_eq = go.Figure()
+fig_eq.add_trace(go.Scatter(
+    x=ds["datetime"], y=ds["equity"], mode="lines",
+    name="통합" if multi_ex else "자산",
+    line=dict(color=_C["primary"], width=2.5),
+    fill="tozeroy", fillcolor="rgba(107,138,255,0.06)",
+))
+if multi_ex:
+    for en, grp in _all_eq.groupby("exchange"):
+        fig_eq.add_trace(go.Scatter(
+            x=grp["datetime"], y=grp["ex_equity"], mode="lines", name=en,
+            line=dict(color=_EX_COLOR.get(en, "#888"), width=1.5, dash="dot"),
+        ))
+_ref_bal = _total_init if multi_ex else (list(_ex_bal.values())[0] if _ex_bal else init_bal_total)
+fig_eq.add_hline(y=_ref_bal, line_dash="dash", line_color="#4a4a6a", line_width=1,
+                 annotation_text="초기 잔고", annotation_font_color="#7b7b9e")
+fig_eq.update_layout(**{**_CHART, "height": 380}, xaxis_title="", yaxis_title="USDT",
+    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+st.plotly_chart(fig_eq, use_container_width=True)
 
 
 # ══════════════════════════════════════════════════
@@ -487,11 +547,12 @@ if "exchange" in df.columns and df["exchange"].nunique() > 1:
         with ex_cols[i]:
             eb = _ex_bal.get(en, 10_000)
             ex_current = max(0, eb + float(grp["net_pnl"].sum()))
-            ep = ex_current - eb  # 순이익 = 현재잔고 - 초기 (0 바닥 반영)
+            ep = ex_current - eb
             ew = len(grp[grp["pnl_usdt"] > 0]) / len(grp) * 100
-            ex_roi = (ep / eb * 100) if eb > 0 else 0  # 최저 -100%
+            ex_roi = (ep / eb * 100) if eb > 0 else 0
             color = _EX_COLOR.get(en, "#6b8aff")
             pnl_color = _C["profit"] if ep >= 0 else _C["loss"]
+            _ep_sign = "+" if ep >= 0 else ""
             st.markdown(
                 f'<div style="border-left:3px solid {color};padding:10px 14px;'
                 f'background:rgba(255,255,255,0.02);border-radius:0 10px 10px 0;margin-bottom:8px">'
@@ -499,7 +560,7 @@ if "exchange" in df.columns and df["exchange"].nunique() > 1:
                 f'<div style="font-size:22px;font-family:JetBrains Mono;color:{pnl_color};font-weight:700">'
                 f'${ex_current:,.2f}</div>'
                 f'<div style="font-size:14px;font-family:JetBrains Mono;color:{pnl_color}">'
-                f'{ex_roi:+.2f}% ({_pnl_sign}${abs(ep):,.2f})</div>'
+                f'{ex_roi:+.2f}% ({_ep_sign}${abs(ep):,.2f})</div>'
                 f'<div style="font-size:12px;color:#7b7b9e;margin-top:4px">'
                 f'초기 ${eb:,.0f} · {len(grp)}건 · 승률 {ew:.1f}%</div>'
                 f'</div>',
@@ -507,75 +568,6 @@ if "exchange" in df.columns and df["exchange"].nunique() > 1:
             )
 elif "exchange" in df.columns:
     render_ai("exchange_comparison")
-
-
-# ══════════════════════════════════════════════════
-# SECTION: 자산 곡선 (수익금 + 수익률)
-# ══════════════════════════════════════════════════
-st.markdown('<div class="section-hdr">자산 곡선</div>', unsafe_allow_html=True)
-render_ai("equity_curve")
-
-multi_ex = "exchange" in df.columns and df["exchange"].nunique() > 1
-
-# 거래소별 초기 잔고 매핑
-_dep = st.session_state.deposits
-_ex_bal = {}
-if not _dep.empty and "exchange" in _dep.columns:
-    _ex_bal = _dep.groupby("exchange")["amount_usdt"].sum().to_dict()
-
-# ── 거래소별 equity를 각각 계산 후 합산 (잔고 0 바닥 개별 적용) ──
-# 각 거래소는 독립 계좌 → 잔고가 0이면 해당 거래소에서 거래 불가
-# 통합 equity = sum(거래소별 equity)
-if multi_ex:
-    _ex_equity_frames = []
-    for en, grp in df.groupby("exchange"):
-        g = grp.sort_values("datetime").copy()
-        eb = _ex_bal.get(en, 10_000)
-        g["ex_equity"] = (eb + g["net_pnl"].cumsum()).clip(lower=0)
-        g["ex_roi"] = ((g["ex_equity"] / eb) - 1) * 100
-        g["_ex_bal"] = eb
-        _ex_equity_frames.append(g[["datetime", "exchange", "net_pnl", "symbol", "side", "ex_equity", "ex_roi", "_ex_bal"]])
-    _all_eq = pd.concat(_ex_equity_frames).sort_values("datetime")
-    # 통합: 시점별 거래소 equity 합산
-    ds = _all_eq.copy()
-    # 각 거래소의 마지막 equity를 forward-fill해서 시점별 합산
-    _pivot = _all_eq.pivot_table(index="datetime", columns="exchange", values="ex_equity", aggfunc="last")
-    _pivot = _pivot.ffill().fillna(method="bfill")
-    _pivot["total"] = _pivot.sum(axis=1)
-    _total_init = sum(_ex_bal.get(en, 10_000) for en in df["exchange"].unique())
-    _pivot["total_roi"] = ((_pivot["total"] / _total_init) - 1) * 100
-    # ds에 통합 equity/roi 매핑
-    ds = ds.merge(_pivot[["total", "total_roi"]].reset_index(), on="datetime", how="left")
-    ds["equity"] = ds["total"]
-    ds["roi_pct"] = ds["total_roi"]
-else:
-    ds = df.sort_values("datetime").copy()
-    eb = list(_ex_bal.values())[0] if _ex_bal else init_bal_total
-    ds["equity"] = (eb + ds["net_pnl"].cumsum()).clip(lower=0)
-    ds["roi_pct"] = ((ds["equity"] / eb) - 1) * 100
-    ds["ex_equity"] = ds["equity"]
-    _total_init = eb
-
-# ── 수익금 그래프 ────────────────────────────────
-fig_eq = go.Figure()
-fig_eq.add_trace(go.Scatter(
-    x=ds["datetime"], y=ds["equity"], mode="lines",
-    name="통합" if multi_ex else "자산",
-    line=dict(color=_C["primary"], width=2.5),
-    fill="tozeroy", fillcolor="rgba(107,138,255,0.06)",
-))
-if multi_ex:
-    for en, grp in _all_eq.groupby("exchange"):
-        fig_eq.add_trace(go.Scatter(
-            x=grp["datetime"], y=grp["ex_equity"], mode="lines", name=en,
-            line=dict(color=_EX_COLOR.get(en, "#888"), width=1.5, dash="dot"),
-        ))
-_ref_bal = _total_init if multi_ex else (list(_ex_bal.values())[0] if _ex_bal else init_bal_total)
-fig_eq.add_hline(y=_ref_bal, line_dash="dash", line_color="#4a4a6a", line_width=1,
-                 annotation_text="초기 잔고", annotation_font_color="#7b7b9e")
-fig_eq.update_layout(**{**_CHART, "height": 380}, xaxis_title="", yaxis_title="USDT",
-    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
-st.plotly_chart(fig_eq, use_container_width=True)
 
 
 # ══════════════════════════════════════════════════
