@@ -330,7 +330,7 @@ with top_left:
     st.markdown(f'{badges} &nbsp; 거래소 **{n_ex}개** · 거래 **{len(st.session_state.trades)}건**', unsafe_allow_html=True)
 with top_right:
     run_ai = st.button(
-        "🤖 AI 분석",
+        "AI 분석",
         use_container_width=True,
         type="primary",
         disabled=not has_data,
