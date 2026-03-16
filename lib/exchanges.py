@@ -87,6 +87,9 @@ def test_connection(exchange) -> dict:
     except ccxt.PermissionDenied:
         return {"ok": False, "msg": "권한 부족: API 키에 선물 읽기 권한이 필요합니다."}
     except ccxt.NetworkError as e:
+        err = str(e)
+        if "restricted location" in err or "451" in err:
+            return {"ok": False, "msg": "지역 제한: 해당 거래소는 현재 위치(한국)에서 API 접속이 차단됩니다. VPN을 사용하거나 다른 거래소를 이용해주세요."}
         return {"ok": False, "msg": f"네트워크 오류: {e}"}
     except Exception as e:
         return {"ok": False, "msg": f"연결 실패: {e}"}
