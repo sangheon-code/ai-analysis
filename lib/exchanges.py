@@ -70,32 +70,28 @@ def create_exchange(name: str, api_key: str, api_secret: str,
 # ─────────────────────────────────────────────────
 def test_connection(exchange) -> dict:
     """API 연결 + 잔고 확인 (선물 엔드포인트 우선)"""
-    try:
-        # 선물 잔고 조회 시도 (sapi 대신 fapi/v5 등 사용)
-        balance = exchange.fetch_balance({"type": "swap"})
-        usdt = balance.get("USDT", {})
-        total = float(usdt.get("total", 0) or 0)
-        free = float(usdt.get("free", 0) or 0)
-        return {
-            "ok": True,
-            "total_usdt": round(total, 2),
-            "free_usdt": round(free, 2),
-            "msg": f"연결 성공 · 잔고: ${total:,.2f} USDT",
-        }
-    except Exception:
-        pass
+    # 바이낸스: sapi가 한국에서 차단됨 → fapi 직접 호출
+    exchange_id = exchange.id if hasattr(exchange, "id") else ""
 
-    # fallback: 일반 잔고 조회
     try:
-        balance = exchange.fetch_balance()
-        usdt = balance.get("USDT", {})
-        total = float(usdt.get("total", 0) or 0)
-        return {
-            "ok": True,
-            "total_usdt": round(total, 2),
-            "free_usdt": round(total, 2),
-            "msg": f"연결 성공 · 잔고: ${total:,.2f} USDT",
-        }
+        if exchange_id == "binance":
+            # fapi/v2/balance 직접 호출 (sapi 우회)
+            resp = exchange.fapiPrivateV2GetBalance()
+            usdt_item = next((x for x in resp if x.get("asset") == "USDT"), None)
+            if usdt_item:
+                total = round(float(usdt_item.get("balance", 0)), 2)
+                free = round(float(usdt_item.get("availableBalance", 0)), 2)
+            else:
+                total, free = 0, 0
+            return {"ok": True, "total_usdt": total, "free_usdt": free,
+                    "msg": f"연결 성공 · 선물 잔고: ${total:,.2f} USDT"}
+        else:
+            balance = exchange.fetch_balance()
+            usdt = balance.get("USDT", {})
+            total = float(usdt.get("total", 0) or 0)
+            free = float(usdt.get("free", 0) or 0)
+            return {"ok": True, "total_usdt": round(total, 2), "free_usdt": round(free, 2),
+                    "msg": f"연결 성공 · 잔고: ${total:,.2f} USDT"}
     except ccxt.AuthenticationError:
         return {"ok": False, "msg": "인증 실패: API Key / Secret을 확인해주세요."}
     except ccxt.PermissionDenied:
