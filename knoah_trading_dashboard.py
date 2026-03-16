@@ -155,7 +155,7 @@ with st.sidebar:
 
     if is_any_connected():
         st.markdown("---")
-        fetch_days = st.number_input("조회 기간(일)", 7, 90, 30, key="fetch_days")
+        fetch_days = st.number_input("조회 기간(일)", 7, 1095, 90, key="fetch_days")
         fetch_targets = st.multiselect("대상", connected_exchanges(), default=connected_exchanges(), key="ft")
         if st.button("📥 거래 내역 가져오기", use_container_width=True, type="primary"):
             total = 0

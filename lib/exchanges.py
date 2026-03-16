@@ -139,27 +139,43 @@ def _fetch_binance(exchange, since_ms: int, symbols: list = None) -> pd.DataFram
     """
     rows = []
 
-    # 1) REALIZED_PNL income records
-    income_data = exchange.fapiPrivateGetIncome({
-        "incomeType": "REALIZED_PNL",
-        "startTime": since_ms,
-        "limit": 1000,
-    })
+    # 1) REALIZED_PNL income records (페이지네이션)
+    income_data = []
+    _cursor_time = since_ms
+    for _ in range(50):  # 최대 50페이지 = 50,000건
+        batch = exchange.fapiPrivateGetIncome({
+            "incomeType": "REALIZED_PNL",
+            "startTime": _cursor_time,
+            "limit": 1000,
+        })
+        if not batch:
+            break
+        income_data.extend(batch)
+        _cursor_time = int(batch[-1].get("time", 0)) + 1
+        if len(batch) < 1000:
+            break
 
-    # 2) User trades for entry/exit details
-    trade_symbols = symbols or _get_active_symbols_binance(exchange, since_ms)
+    # 2) User trades for entry/exit details (페이지네이션)
+    trade_symbols = symbols or list(set(i.get("symbol", "") for i in income_data if i.get("symbol")))
 
     all_trades = []
     for sym in trade_symbols:
-        try:
-            trades = exchange.fapiPrivateGetUserTrades({
-                "symbol": sym.replace("/", "").replace(":USDT", ""),
-                "startTime": since_ms,
-                "limit": 1000,
-            })
-            all_trades.extend(trades)
-        except Exception:
-            continue
+        _sym_cursor = since_ms
+        for _ in range(20):
+            try:
+                trades = exchange.fapiPrivateGetUserTrades({
+                    "symbol": sym.replace("/", "").replace(":USDT", ""),
+                    "startTime": _sym_cursor,
+                    "limit": 1000,
+                })
+                if not trades:
+                    break
+                all_trades.extend(trades)
+                _sym_cursor = int(trades[-1].get("time", 0)) + 1
+                if len(trades) < 1000:
+                    break
+            except Exception:
+                break
 
     # income으로 포지션별 PnL 집계
     for inc in income_data:
@@ -202,18 +218,6 @@ def _fetch_binance(exchange, since_ms: int, symbols: list = None) -> pd.DataFram
 
     return _to_dataframe(rows)
 
-
-def _get_active_symbols_binance(exchange, since_ms: int) -> list:
-    """최근 거래가 있는 심볼 목록 조회"""
-    try:
-        income = exchange.fapiPrivateGetIncome({
-            "incomeType": "REALIZED_PNL",
-            "startTime": since_ms,
-            "limit": 1000,
-        })
-        return list(set(i.get("symbol", "") for i in income if i.get("symbol")))
-    except Exception:
-        return ["BTCUSDT", "ETHUSDT"]
 
 
 # ── Bybit ────────────────────────────────────────
