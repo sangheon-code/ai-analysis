@@ -246,12 +246,14 @@ def _fetch_binance(exchange, since_ms: int, symbols: list = None) -> pd.DataFram
 # ── Bybit ────────────────────────────────────────
 def _fetch_bybit(exchange, since_ms: int) -> pd.DataFrame:
     """
-    Bybit V5: /v5/position/closed-pnl — 포지션 단위 PnL 직접 제공
+    Bybit V5: /v5/position/closed-pnl
+    closedPnl = 순수익 (수수료 차감 전), 별도로 수수료 계산 필요 없음
+    Bybit closedPnl에는 거래 수수료+펀딩피가 이미 차감되어 있음
     """
     rows = []
     cursor = ""
 
-    for _ in range(10):  # 최대 10페이지
+    for _ in range(50):  # 최대 50페이지 = 10,000건 (3년치 대응)
         params = {"category": "linear", "limit": 200}
         if cursor:
             params["cursor"] = cursor
@@ -263,15 +265,21 @@ def _fetch_bybit(exchange, since_ms: int) -> pd.DataFrame:
         if not items:
             break
 
+        reached_start = False
         for item in items:
             ts = int(item.get("updatedTime", item.get("createdTime", 0)))
             if ts < since_ms:
+                reached_start = True
                 continue
 
             symbol = item.get("symbol", "")
             side = item.get("side", "Buy")
             side = "LONG" if side == "Buy" else "SHORT"
 
+            # closedPnl은 수수료 차감 후 순손익
+            closed_pnl = float(item.get("closedPnl", 0))
+            # cumEntryValue, cumExitValue로 수수료 역산 가능하지만
+            # closedPnl이 이미 net이므로 fee=0으로 처리
             rows.append({
                 "datetime": datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d %H:%M"),
                 "symbol": symbol,
@@ -280,15 +288,15 @@ def _fetch_bybit(exchange, since_ms: int) -> pd.DataFrame:
                 "entry_price": round(float(item.get("avgEntryPrice", 0)), 4),
                 "exit_price": round(float(item.get("avgExitPrice", 0)), 4),
                 "quantity_usdt": round(float(item.get("cumEntryValue", 0)), 2),
-                "pnl_usdt": round(float(item.get("closedPnl", 0)), 2),
-                "fee_usdt": 0,
+                "pnl_usdt": round(closed_pnl, 2),
+                "fee_usdt": 0,  # closedPnl이 이미 수수료 차감 후
                 "holding_minutes": 0,
                 "order_type": item.get("orderType", "Market").upper(),
                 "stoploss_set": False,
             })
 
         cursor = result.get("nextPageCursor", "")
-        if not cursor:
+        if not cursor or reached_start:
             break
 
     return _to_dataframe(rows)
@@ -298,11 +306,15 @@ def _fetch_bybit(exchange, since_ms: int) -> pd.DataFrame:
 def _fetch_okx(exchange) -> pd.DataFrame:
     """
     OKX: /api/v5/account/positions-history — 종료된 포지션 이력
+    페이지네이션: after 파라미터로 이전 데이터 조회
     """
     rows = []
+    after = ""
 
-    for _ in range(5):  # 페이지네이션
+    for _ in range(50):  # 최대 50페이지 = 5,000건
         params = {"instType": "SWAP", "limit": "100"}
+        if after:
+            params["after"] = after
 
         resp = exchange.privateGetApiV5AccountPositionsHistory(params)
         data = resp.get("data", [])
@@ -312,7 +324,6 @@ def _fetch_okx(exchange) -> pd.DataFrame:
 
         for pos in data:
             inst_id = pos.get("instId", "")
-            # OKX instId: BTC-USDT-SWAP → BTCUSDT
             symbol = inst_id.replace("-SWAP", "").replace("-", "")
 
             direction = pos.get("direction", "")
@@ -320,6 +331,7 @@ def _fetch_okx(exchange) -> pd.DataFrame:
 
             ts = int(pos.get("uTime", pos.get("cTime", 0)))
 
+            # OKX pnl에는 수수료가 별도 → fee + fundingFee 합산
             rows.append({
                 "datetime": datetime.fromtimestamp(ts / 1000).strftime("%Y-%m-%d %H:%M"),
                 "symbol": symbol,
@@ -335,7 +347,10 @@ def _fetch_okx(exchange) -> pd.DataFrame:
                 "stoploss_set": False,
             })
 
-        break  # OKX는 after 파라미터로 페이지네이션 (간소화)
+        # 페이지네이션: 마지막 항목의 posId를 after로
+        after = data[-1].get("posId", "")
+        if len(data) < 100:
+            break
 
     return _to_dataframe(rows)
 
@@ -344,31 +359,38 @@ def _fetch_okx(exchange) -> pd.DataFrame:
 def _fetch_bitget(exchange) -> pd.DataFrame:
     """
     Bitget: /api/v2/mix/position/history-position — 포지션 이력
+    페이지네이션: endId로 이전 데이터 조회
     """
     rows = []
+    all_items = []
+    end_id = ""
 
-    try:
-        resp = exchange.privateGetApiV2MixPositionHistoryPosition({
-            "productType": "USDT-FUTURES",
-            "limit": "200",
-        })
-        data = resp.get("data", {})
-        items = data.get("list", data) if isinstance(data, dict) else data
-        if not isinstance(items, list):
-            items = []
-
-    except Exception:
-        # fallback: fill history
+    for _ in range(25):  # 최대 25페이지 = 5,000건
         try:
-            resp = exchange.privateGetApiV2MixOrderFillHistory({
-                "productType": "USDT-FUTURES",
-                "limit": "200",
-            })
-            items = resp.get("data", {}).get("fillList", [])
+            params = {"productType": "USDT-FUTURES", "limit": "200"}
+            if end_id:
+                params["endId"] = end_id
+            resp = exchange.privateGetApiV2MixPositionHistoryPosition(params)
+            data = resp.get("data", {})
+            items = data.get("list", data) if isinstance(data, dict) else data
+            if not isinstance(items, list) or not items:
+                break
+            all_items.extend(items)
+            end_id = items[-1].get("odId", items[-1].get("id", ""))
+            if len(items) < 200:
+                break
         except Exception:
-            items = []
+            # fallback: fill history (1페이지만)
+            try:
+                resp = exchange.privateGetApiV2MixOrderFillHistory({
+                    "productType": "USDT-FUTURES", "limit": "200",
+                })
+                all_items = resp.get("data", {}).get("fillList", [])
+            except Exception:
+                pass
+            break
 
-    for item in items:
+    for item in all_items:
         symbol = item.get("symbol", "")
         # Bitget symbol: BTCUSDT → BTCUSDT or BTCUSDT_UMCBL → BTCUSDT
         symbol = symbol.split("_")[0] if "_" in symbol else symbol
@@ -435,28 +457,28 @@ def fetch_deposits_withdrawals(exchange, days: int = 90) -> pd.DataFrame:
         df.insert(0, "id", range(len(df)))
         return df
 
-    # 다른 거래소: 기존 방식
-    try:
-        deposits = exchange.fetch_deposits("USDT", since_ms, 100)
-        for dep in deposits:
-            rows.append({
-                "datetime": datetime.fromtimestamp(dep["timestamp"] / 1000).strftime("%Y-%m-%d %H:%M"),
-                "type": "DEPOSIT",
-                "amount_usdt": round(float(dep.get("amount", 0)), 2),
-            })
-    except Exception:
-        pass
-
-    try:
-        withdrawals = exchange.fetch_withdrawals("USDT", since_ms, 100)
-        for wd in withdrawals:
-            rows.append({
-                "datetime": datetime.fromtimestamp(wd["timestamp"] / 1000).strftime("%Y-%m-%d %H:%M"),
-                "type": "WITHDRAWAL",
-                "amount_usdt": round(float(wd.get("amount", 0)), 2),
-            })
-    except Exception:
-        pass
+    # 다른 거래소: ccxt 통합 API (페이지네이션)
+    for _type, _label in [("deposit", "DEPOSIT"), ("withdrawal", "WITHDRAWAL")]:
+        try:
+            _since = since_ms
+            for _ in range(10):
+                if _type == "deposit":
+                    batch = exchange.fetch_deposits("USDT", _since, 100)
+                else:
+                    batch = exchange.fetch_withdrawals("USDT", _since, 100)
+                if not batch:
+                    break
+                for item in batch:
+                    rows.append({
+                        "datetime": datetime.fromtimestamp(item["timestamp"] / 1000).strftime("%Y-%m-%d %H:%M"),
+                        "type": _label,
+                        "amount_usdt": round(float(item.get("amount", 0)), 2),
+                    })
+                _since = int(batch[-1]["timestamp"]) + 1
+                if len(batch) < 100:
+                    break
+        except Exception:
+            pass
 
     if not rows:
         return pd.DataFrame(columns=["id", "datetime", "type", "amount_usdt"])
