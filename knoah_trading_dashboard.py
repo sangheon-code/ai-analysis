@@ -516,7 +516,7 @@ with tab_ai:
         info_parts = ["Claude Sonnet · 약 10~15초 소요"]
         if _balance_info and _balance_info["ok"]:
             info_parts.append(f"잔고: {_balance_info['balance']}")
-        info_parts.append("회당 약 \\$0.01~0.05")
+        info_parts.append("회당 약 \\$0.01-0.05")
         last = st.session_state.get("ai_last_cost")
         if last and isinstance(last, dict):
             info_parts.append(f"마지막: {last['input_tokens']+last['output_tokens']:,}토큰 \\${last['cost_usd']:.4f}")
