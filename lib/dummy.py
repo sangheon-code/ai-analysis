@@ -21,9 +21,9 @@ def generate_trades(n: int, exchange: str, days: int = 30,
     base_time = datetime.now() - timedelta(days=days)
 
     skill = np.random.choice(
-        ["beginner", "intermediate", "advanced"], p=[0.5, 0.35, 0.15]
+        ["beginner", "intermediate", "advanced"], p=[0.3, 0.45, 0.25]
     )
-    win_base = {"beginner": 0.32, "intermediate": 0.45, "advanced": 0.55}[skill]
+    win_base = {"beginner": 0.38, "intermediate": 0.48, "advanced": 0.56}[skill]
 
     sym_probs = [0.25, 0.20, 0.15, 0.10, 0.08, 0.07, 0.05, 0.04, 0.03, 0.03]
     lev_normal = [0.05, 0.10, 0.20, 0.20, 0.15, 0.12, 0.10, 0.05, 0.03]
@@ -47,11 +47,10 @@ def generate_trades(n: int, exchange: str, days: int = 30,
         liq_pct = 0.85 / leverage
 
         if win:
-            pct = np.random.exponential(0.02)
-            # 수익도 현실적 범위로 제한 (한 거래에서 마진의 200% 이상 수익은 드묾)
+            pct = np.random.exponential(0.022)
             pct = min(pct, 2.0 / leverage)
         else:
-            pct = np.random.exponential(0.025)
+            pct = np.random.exponential(0.020)  # 수익과 대칭 (기존 0.025는 손실 편향)
             if pct >= liq_pct:
                 # 청산 발생 → 마진 전액 손실 (-100%)
                 pct = liq_pct
