@@ -491,9 +491,9 @@ if "exchange" in df.columns and df["exchange"].nunique() > 1:
         with ex_cols[i]:
             eb = _ex_bal.get(en, 10_000)
             ex_current = max(0, eb + float(grp["net_pnl"].sum()))
-            ep = float(grp["net_pnl"].sum())
+            ep = ex_current - eb  # 순이익 = 현재잔고 - 초기 (0 바닥 반영)
             ew = len(grp[grp["pnl_usdt"] > 0]) / len(grp) * 100
-            ex_roi = (ep / eb * 100) if eb > 0 else 0
+            ex_roi = (ep / eb * 100) if eb > 0 else 0  # 최저 -100%
             color = _EX_COLOR.get(en, "#6b8aff")
             pnl_color = _C["profit"] if ep >= 0 else _C["loss"]
             st.markdown(
@@ -560,66 +560,26 @@ else:
     ds["ex_equity"] = ds["equity"]
     _total_init = eb
 
-eq_col1, eq_col2 = st.columns(2)
-
 # ── 수익금 그래프 ────────────────────────────────
-with eq_col1:
-    st.markdown("**수익금 (Equity)**")
-    fig_eq = go.Figure()
-    fig_eq.add_trace(go.Scatter(
-        x=ds["datetime"], y=ds["equity"], mode="lines",
-        name="통합" if multi_ex else "자산",
-        line=dict(color=_C["primary"], width=2.5),
-        fill="tozeroy", fillcolor="rgba(107,138,255,0.06)",
-    ))
-    if multi_ex:
-        for en, grp in _all_eq.groupby("exchange"):
-            fig_eq.add_trace(go.Scatter(
-                x=grp["datetime"], y=grp["ex_equity"], mode="lines", name=en,
-                line=dict(color=_EX_COLOR.get(en, "#888"), width=1.5, dash="dot"),
-            ))
-    # 거래 마커
-    wins_ds = ds[ds["net_pnl"] >= 0]
-    loss_ds = ds[ds["net_pnl"] < 0]
-    fig_eq.add_trace(go.Scatter(
-        x=wins_ds["datetime"], y=wins_ds["equity"], mode="markers", name="수익",
-        marker=dict(color=_C["profit"], size=4, opacity=0.5),
-        hovertemplate="%{customdata[0]} %{customdata[1]}<br>%{customdata[2]}<extra></extra>",
-        customdata=list(zip(wins_ds["symbol"], wins_ds["side"], [f"+${v:,.0f}" for v in wins_ds["net_pnl"]])),
-    ))
-    fig_eq.add_trace(go.Scatter(
-        x=loss_ds["datetime"], y=loss_ds["equity"], mode="markers", name="손실",
-        marker=dict(color=_C["loss"], size=4, opacity=0.5),
-        hovertemplate="%{customdata[0]} %{customdata[1]}<br>%{customdata[2]}<extra></extra>",
-        customdata=list(zip(loss_ds["symbol"], loss_ds["side"], [f"${v:,.0f}" for v in loss_ds["net_pnl"]])),
-    ))
-    _ref_bal = _total_init if multi_ex else (list(_ex_bal.values())[0] if _ex_bal else init_bal_total)
-    fig_eq.add_hline(y=_ref_bal, line_dash="dash", line_color="#4a4a6a", line_width=1,
-                     annotation_text="초기 잔고", annotation_font_color="#7b7b9e")
-    fig_eq.update_layout(**{**_CHART, "height": 360}, xaxis_title="", yaxis_title="USDT",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
-    st.plotly_chart(fig_eq, use_container_width=True)
-
-# ── 수익률 그래프 ────────────────────────────────
-with eq_col2:
-    st.markdown("**수익률 (ROI %)**")
-    fig_roi = go.Figure()
-    fig_roi.add_trace(go.Scatter(
-        x=ds["datetime"], y=ds["roi_pct"], mode="lines",
-        name="통합" if multi_ex else "ROI",
-        line=dict(color=_C["secondary"], width=2.5),
-        fill="tozeroy", fillcolor="rgba(167,139,250,0.08)",
-    ))
-    if multi_ex:
-        for en, grp in _all_eq.groupby("exchange"):
-            fig_roi.add_trace(go.Scatter(
-                x=grp["datetime"], y=grp["ex_roi"], mode="lines", name=en,
-                line=dict(color=_EX_COLOR.get(en, "#888"), width=1.5, dash="dot"),
-            ))
-    fig_roi.add_hline(y=0, line_dash="dash", line_color="#4a4a6a", line_width=1)
-    fig_roi.update_layout(**{**_CHART, "height": 360}, xaxis_title="", yaxis_title="%",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
-    st.plotly_chart(fig_roi, use_container_width=True)
+fig_eq = go.Figure()
+fig_eq.add_trace(go.Scatter(
+    x=ds["datetime"], y=ds["equity"], mode="lines",
+    name="통합" if multi_ex else "자산",
+    line=dict(color=_C["primary"], width=2.5),
+    fill="tozeroy", fillcolor="rgba(107,138,255,0.06)",
+))
+if multi_ex:
+    for en, grp in _all_eq.groupby("exchange"):
+        fig_eq.add_trace(go.Scatter(
+            x=grp["datetime"], y=grp["ex_equity"], mode="lines", name=en,
+            line=dict(color=_EX_COLOR.get(en, "#888"), width=1.5, dash="dot"),
+        ))
+_ref_bal = _total_init if multi_ex else (list(_ex_bal.values())[0] if _ex_bal else init_bal_total)
+fig_eq.add_hline(y=_ref_bal, line_dash="dash", line_color="#4a4a6a", line_width=1,
+                 annotation_text="초기 잔고", annotation_font_color="#7b7b9e")
+fig_eq.update_layout(**{**_CHART, "height": 380}, xaxis_title="", yaxis_title="USDT",
+    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+st.plotly_chart(fig_eq, use_container_width=True)
 
 
 # ══════════════════════════════════════════════════
