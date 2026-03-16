@@ -330,7 +330,7 @@ with top_left:
     st.markdown(f'{badges} &nbsp; 거래소 **{n_ex}개** · 거래 **{len(st.session_state.trades)}건**', unsafe_allow_html=True)
 with top_right:
     run_ai = st.button(
-        "🤖 AI 분석" if not st.session_state.ai_comments else "🔄 재분석",
+        "🤖 AI 분석",
         use_container_width=True,
         type="primary",
         disabled=not has_data,
@@ -342,18 +342,15 @@ if run_ai and has_data:
     df_for_ai = st.session_state.trades.copy()
     aggregated = aggregate_data(df_for_ai, st.session_state.deposits, "통합")
     if not api_key_claude:
-        st.toast("API 키 없음 → 더미 분석 사용", icon="⚠️")
         st.session_state.ai_comments = generate_dummy_comments(aggregated)
-        st.rerun()
     else:
         with st.spinner("Claude가 분석 중..."):
             try:
                 st.session_state.ai_comments = call_claude_sections(aggregated, api_key_claude)
-                st.rerun()
             except Exception as e:
                 st.error(f"AI 분석 실패: {e}")
                 st.session_state.ai_comments = generate_dummy_comments(aggregated)
-                st.rerun()
+    st.rerun()
 
 # ── 거래소 필터 ──────────────────────────────────
 avail_ex = sorted(st.session_state.trades["exchange"].unique().tolist()) if has_data and "exchange" in st.session_state.trades.columns else []
