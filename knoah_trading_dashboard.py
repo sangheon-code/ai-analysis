@@ -522,14 +522,18 @@ _avg_win = float(df[df["pnl_usdt"] > 0]["net_pnl"].mean()) if win_count > 0 else
 _avg_loss = float(df[df["pnl_usdt"] <= 0]["net_pnl"].mean()) if len(df) - win_count > 0 else 0
 _pf = round(abs(float(df[df["net_pnl"] > 0]["net_pnl"].sum())) / max(abs(float(df[df["net_pnl"] <= 0]["net_pnl"].sum())), 1), 2)
 
-m1, m2, m3, m4, m5, m6, m7 = st.columns(7)
-m1.metric("총 거래", f"{len(df)}건")
-m2.metric("승률", f"{win_rate:.1f}%")
-m3.metric("평균 수익", f"${_avg_win:,.2f}")
-m4.metric("평균 손실", f"${_avg_loss:,.2f}")
-m5.metric("수익 팩터", f"{_pf}")
-m6.metric("평균 레버리지", f"{avg_lev:.1f}x")
-m7.metric("총 수수료", f"${total_fee:,.2f}")
+_r1c1, _r1c2, _r1c3, _r1c4 = st.columns(4)
+_r1c1.metric("총 거래", f"{len(df)}건")
+_r1c2.metric("승률", f"{win_rate:.1f}%")
+_r1c3.metric("평균 수익", f"${_avg_win:,.2f}")
+_r1c4.metric("평균 손실", f"${_avg_loss:,.2f}")
+_r2c1, _r2c2, _r2c3, _r2c4 = st.columns(4)
+_r2c1.metric("수익 팩터", f"{_pf}")
+_r2c2.metric("평균 레버리지", f"{avg_lev:.1f}x")
+_r2c3.metric("총 수수료", f"${total_fee:,.2f}")
+_peak = ds["equity"].cummax()
+_mdd_pct = float((ds["equity"] - _peak).min() / _peak.max() * 100) if _peak.max() > 0 else 0
+_r2c4.metric("MDD", f"{_mdd_pct:.1f}%")
 
 
 # ── 거래소별 성과 카드 ───────────────────────────
@@ -621,11 +625,11 @@ with col_l2:
     st.plotly_chart(fig_d, use_container_width=True)
 
 with col_r2:
-    st.markdown('<div class="section-hdr">시간대별 거래</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-hdr">시간대별 거래 (KST)</div>', unsafe_allow_html=True)
     render_ai("hourly_pattern")
-    df["hour"] = df["datetime"].dt.hour
-    hc = df.groupby("hour").size().reindex(range(24), fill_value=0)
-    hp = df.groupby("hour")["net_pnl"].sum().reindex(range(24), fill_value=0)
+    df["hour_kst"] = (df["datetime"].dt.hour + 9) % 24  # UTC → KST
+    hc = df.groupby("hour_kst").size().reindex(range(24), fill_value=0)
+    hp = df.groupby("hour_kst")["net_pnl"].sum().reindex(range(24), fill_value=0)
     fig_h = go.Figure()
     fig_h.add_trace(go.Bar(x=list(range(24)), y=hc.values, name="거래수", marker_color=_C["neutral"]))
     fig_h.add_trace(go.Scatter(
@@ -636,6 +640,7 @@ with col_r2:
         **_CHART,
         yaxis=dict(title="거래수", side="left"),
         yaxis2=dict(title="PnL", side="right", overlaying="y"),
+        xaxis_title="시간 (KST)",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         barmode="overlay",
     )
