@@ -250,24 +250,40 @@ if df.empty: st.warning("선택된 거래소에 데이터가 없습니다."); st
 df["datetime"] = pd.to_datetime(df["datetime"])
 df["net_pnl"] = df["pnl_usdt"] - df["fee_usdt"]
 
-# ── KNOAH 수익률 계산 ────────────────────────────
+# ── 잔고 계산 (API 연결 시 실제 잔고 사용) ───────
+_connections = st.session_state.connections
 _dep_all = st.session_state.deposits if not st.session_state.deposits.empty else pd.DataFrame(columns=["type", "amount_usdt", "exchange"])
-_ex_bal = {}
-if not _dep_all.empty and "exchange" in _dep_all.columns:
-    for en, grp in _dep_all.groupby("exchange"):
-        deps = grp[grp["type"] == "DEPOSIT"]["amount_usdt"]
-        _ex_bal[en] = float(deps.iloc[0]) if len(deps) > 0 else 10_000
-init_bal_total = sum(_ex_bal.values()) if _ex_bal else 10_000
 
+# 거래소별 현재 잔고 + 초기 잔고
+_ex_live_bal = {}   # API에서 가져온 현재 잔고
+_ex_init_bal = {}   # 역산한 초기 잔고
+
+for en in (df["exchange"].unique() if "exchange" in df.columns else ["default"]):
+    ex_pnl = float(df[df["exchange"] == en]["net_pnl"].sum()) if en != "default" else float(df["net_pnl"].sum())
+
+    if en in _connections and _connections[en].get("balance", 0) > 0:
+        # API 연결됨 → 실제 잔고에서 초기잔고 역산
+        live = float(_connections[en]["balance"])
+        _ex_live_bal[en] = live
+        _ex_init_bal[en] = max(0, live - ex_pnl)
+    else:
+        # 연결 없음 → deposit 데이터 또는 기본값
+        if not _dep_all.empty and "exchange" in _dep_all.columns:
+            deps = _dep_all[(_dep_all["exchange"] == en) & (_dep_all["type"] == "DEPOSIT")]["amount_usdt"]
+            eb = float(deps.iloc[0]) if len(deps) > 0 else 10_000
+        else:
+            eb = 10_000
+        _ex_init_bal[en] = eb
+        _ex_live_bal[en] = max(0, eb + ex_pnl)
+
+_current_bal = sum(_ex_live_bal.values())
+init_bal_total = sum(_ex_init_bal.values())
+_ex_bal = _ex_init_bal  # 기존 코드 호환
+
+# 입출금
 _all_deposits = float(_dep_all[_dep_all["type"] == "DEPOSIT"]["amount_usdt"].sum()) if len(_dep_all) > 0 else 0
 _extra_deposits = max(_all_deposits - init_bal_total, 0)
 _total_withdrawals = float(_dep_all[_dep_all["type"] == "WITHDRAWAL"]["amount_usdt"].sum()) if len(_dep_all) > 0 else 0
-
-_current_bal = 0
-for en in (df["exchange"].unique() if "exchange" in df.columns else ["default"]):
-    eb = _ex_bal.get(en, 10_000)
-    ex_pnl = float(df[df["exchange"] == en]["net_pnl"].sum()) if en != "default" else float(df["net_pnl"].sum())
-    _current_bal += max(0, eb + ex_pnl)
 
 net_profit = _current_bal - init_bal_total - _extra_deposits + _total_withdrawals
 roi_denom = init_bal_total + _extra_deposits
