@@ -356,14 +356,19 @@ with tab_dashboard:
     st.markdown('<div class="section-hdr">자산 곡선</div>', unsafe_allow_html=True)
     fig_eq = go.Figure()
     fig_eq.add_trace(go.Scatter(x=ds["datetime"], y=ds["equity"], mode="lines", name="통합" if multi_ex else "자산",
-        line=dict(color=_C["primary"], width=2.5), fill="tozeroy", fillcolor="rgba(107,138,255,0.06)"))
+        line=dict(color=_C["primary"], width=2.5), fill="tonexty" if False else None))
     if multi_ex:
         for en, grp in _all_eq.groupby("exchange"):
             fig_eq.add_trace(go.Scatter(x=grp["datetime"], y=grp["ex_equity"], mode="lines", name=en,
                 line=dict(color=_EX_COLOR.get(en, "#888"), width=1.5, dash="dot")))
     _ref_bal = _total_init if multi_ex else (list(_ex_bal.values())[0] if _ex_bal else init_bal_total)
     fig_eq.add_hline(y=_ref_bal, line_dash="dash", line_color="#4a4a6a", line_width=1, annotation_text="초기 잔고", annotation_font_color="#7b7b9e")
+    # y축 범위: 데이터 범위에 맞춰서 변동이 잘 보이도록
+    _eq_min = float(ds["equity"].min())
+    _eq_max = float(ds["equity"].max())
+    _eq_pad = max((_eq_max - _eq_min) * 0.1, 1)
     fig_eq.update_layout(**{**_CHART, "height": 380}, xaxis_title="", yaxis_title="USDT",
+        yaxis_range=[_eq_min - _eq_pad, _eq_max + _eq_pad],
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
     st.plotly_chart(fig_eq, use_container_width=True)
 
@@ -373,7 +378,9 @@ with tab_dashboard:
     _avg_loss = float(df[df["pnl_usdt"] <= 0]["net_pnl"].mean()) if len(df) - win_count > 0 else 0
     _pf = round(abs(float(df[df["net_pnl"] > 0]["net_pnl"].sum())) / max(abs(float(df[df["net_pnl"] <= 0]["net_pnl"].sum())), 1), 2)
     _peak = ds["equity"].cummax()
-    _mdd_pct = float((ds["equity"] - _peak).min() / _peak.max() * 100) if _peak.max() > 0 else 0
+    _dd = ds["equity"] - _peak
+    _mdd_idx = _dd.idxmin()
+    _mdd_pct = float(_dd.min() / _peak[_mdd_idx] * 100) if _peak[_mdd_idx] > 0 else 0
 
     r1 = st.columns(4)
     r1[0].metric("총 거래", f"{len(df)}건"); r1[1].metric("승률", f"{win_rate:.1f}%")
