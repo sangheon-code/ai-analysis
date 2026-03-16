@@ -518,22 +518,18 @@ st.plotly_chart(fig_eq, use_container_width=True)
 st.markdown('<div class="section-hdr">핵심 지표</div>', unsafe_allow_html=True)
 render_ai("overview")
 
-m1, m2, m3, m4 = st.columns(4)
+_avg_win = float(df[df["pnl_usdt"] > 0]["net_pnl"].mean()) if win_count > 0 else 0
+_avg_loss = float(df[df["pnl_usdt"] <= 0]["net_pnl"].mean()) if len(df) - win_count > 0 else 0
+_pf = round(abs(float(df[df["net_pnl"] > 0]["net_pnl"].sum())) / max(abs(float(df[df["net_pnl"] <= 0]["net_pnl"].sum())), 1), 2)
+
+m1, m2, m3, m4, m5, m6, m7 = st.columns(7)
 m1.metric("총 거래", f"{len(df)}건")
 m2.metric("승률", f"{win_rate:.1f}%")
-m3.metric("평균 레버리지", f"{avg_lev:.1f}x")
-m4.metric("총 수수료", f"${total_fee:,.2f}")
-
-# ── 초기 자산 (전체 + 거래소별) ──────────────────
-_n_ex = df["exchange"].nunique() if "exchange" in df.columns else 1
-_bal_cols = st.columns(1 + _n_ex)
-with _bal_cols[0]:
-    st.metric("전체 초기 자산", f"${init_bal_total:,.0f}")
-if _n_ex >= 1 and "exchange" in df.columns:
-    for i, en in enumerate(sorted(df["exchange"].unique())):
-        with _bal_cols[i + 1]:
-            eb = _ex_bal.get(en, 0)
-            st.metric(f"{en} 초기 자산", f"${eb:,.0f}")
+m3.metric("평균 수익", f"${_avg_win:,.2f}")
+m4.metric("평균 손실", f"${_avg_loss:,.2f}")
+m5.metric("수익 팩터", f"{_pf}")
+m6.metric("평균 레버리지", f"{avg_lev:.1f}x")
+m7.metric("총 수수료", f"${total_fee:,.2f}")
 
 
 # ── 거래소별 성과 카드 ───────────────────────────
