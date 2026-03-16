@@ -205,7 +205,13 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("### 🤖 Claude API")
+    # .env → os.getenv, Streamlit Cloud → st.secrets
     _default_key = os.getenv("ANTHROPIC_API_KEY", "")
+    if not _default_key:
+        try:
+            _default_key = st.secrets.get("ANTHROPIC_API_KEY", "")
+        except Exception:
+            _default_key = ""
     api_key_claude = st.text_input("API Key", type="password", value=_default_key, help=".env ANTHROPIC_API_KEY 기본값", key="api_key_claude")
 
     st.markdown("---")
