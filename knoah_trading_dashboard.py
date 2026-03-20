@@ -146,7 +146,7 @@ with st.sidebar:
         passphrase = None
         if exchange_name in ("OKX", "Bitget"):
             passphrase = st.text_input("Passphrase", type="password", key="passphrase")
-        if st.button("🔗 연결", use_container_width=True, disabled=not HAS_CCXT):
+        if st.button("🔗 연결", width="stretch", disabled=not HAS_CCXT):
             if api_key_exchange and api_secret:
                 with st.spinner(f"{exchange_name} 연결 중..."):
                     try:
@@ -164,7 +164,7 @@ with st.sidebar:
         st.markdown("---")
         fetch_days = st.number_input("조회 기간(일)", 7, 1095, 90, key="fetch_days")
         fetch_targets = st.multiselect("대상", connected_exchanges(), default=connected_exchanges(), key="ft")
-        if st.button("📥 거래 내역 가져오기", use_container_width=True, type="primary"):
+        if st.button("📥 거래 내역 가져오기", width="stretch", type="primary"):
             total = 0
             for en in fetch_targets:
                 info = st.session_state.connections[en]
@@ -188,7 +188,7 @@ with st.sidebar:
     for dex in (dummy_exchanges or ["Binance"]):
         ex_balances[dex] = st.number_input(f"{dex} 초기 잔고(USDT)", 100, 1_000_000, 10_000, step=1000, key=f"bal_{dex}")
 
-    if st.button("더미 데이터 생성", use_container_width=True):
+    if st.button("더미 데이터 생성", width="stretch"):
         all_t, all_d = [], []
         exes = dummy_exchanges or ["Binance"]
         per_n = max(n_trades // len(exes), 10)
@@ -205,7 +205,7 @@ with st.sidebar:
         st.session_state.ai_deep_report = None
         st.rerun()
 
-    if st.button("🗑 초기화", use_container_width=True):
+    if st.button("🗑 초기화", width="stretch"):
         for k in ["trades", "deposits", "ai_deep_report", "trade_id_counter"]:
             st.session_state[k] = _DEFAULTS[k]
         st.rerun()
@@ -233,7 +233,7 @@ with st.sidebar:
         with _ch1:
             st.caption(f"{len(st.session_state.chat_history)//2}회 · ${st.session_state.chat_total_cost:.4f}")
         with _ch2:
-            if st.button("초기화", key="chat_clear", use_container_width=True):
+            if st.button("초기화", key="chat_clear", width="stretch"):
                 st.session_state.chat_history = []
                 st.session_state.chat_total_cost = 0.0
                 st.session_state._last_chat_input = ""
@@ -431,7 +431,7 @@ with tab_dashboard:
     fig_eq.update_layout(**{**_CHART, "height": 380}, xaxis_title="", yaxis_title="USDT",
         yaxis_range=[_eq_min - _eq_pad, _eq_max + _eq_pad],
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
-    st.plotly_chart(fig_eq, use_container_width=True)
+    st.plotly_chart(fig_eq, width="stretch")
 
     # ── 핵심 지표 ────────────────────────────────
     st.markdown('<div class="section-hdr">핵심 지표</div>', unsafe_allow_html=True)
@@ -481,7 +481,7 @@ with tab_dashboard:
             marker_color=[_C["profit"] if v >= 0 else _C["loss"] for v in sp.values],
             text=[f"${v:+,.0f}" for v in sp.values], textposition="auto", textfont=dict(size=11)))
         fig_s.update_layout(**_CHART, xaxis_title="USDT", yaxis_title="")
-        st.plotly_chart(fig_s, use_container_width=True)
+        st.plotly_chart(fig_s, width="stretch")
     with col_r:
         st.markdown('<div class="section-hdr">종목별 승률</div>', unsafe_allow_html=True)
         ss = df.groupby("symbol").apply(lambda g: pd.Series({"wr": len(g[g["pnl_usdt"] > 0]) / len(g) * 100, "n": len(g)})).sort_values("wr")
@@ -490,7 +490,7 @@ with tab_dashboard:
             text=[f"{v:.0f}% ({int(n)}건)" for v, n in zip(ss["wr"], ss["n"])], textposition="auto", textfont=dict(size=11)))
         fig_w.add_vline(x=50, line_dash="dash", line_color="#4a4a6a")
         fig_w.update_layout(**_CHART, xaxis_title="%", yaxis_title="")
-        st.plotly_chart(fig_w, use_container_width=True)
+        st.plotly_chart(fig_w, width="stretch")
 
     # ── 시간 패턴 ────────────────────────────────
     col_l2, col_r2 = st.columns(2)
@@ -503,7 +503,7 @@ with tab_dashboard:
             marker_color=[_C["profit"] if v >= 0 else _C["loss"] for v in d_pnl.values],
             text=[f"${v:+,.0f}" for v in d_pnl.values], textposition="outside", textfont=dict(size=10)))
         fig_d.update_layout(**_CHART, xaxis_title="", yaxis_title="USDT")
-        st.plotly_chart(fig_d, use_container_width=True)
+        st.plotly_chart(fig_d, width="stretch")
     with col_r2:
         st.markdown('<div class="section-hdr">시간대별 거래 (KST)</div>', unsafe_allow_html=True)
         df["hour_kst"] = (df["datetime"].dt.hour + 9) % 24
@@ -515,7 +515,7 @@ with tab_dashboard:
             line=dict(color=_C["primary"], width=2), marker=dict(size=4), yaxis="y2"))
         fig_h.update_layout(**_CHART, yaxis=dict(title="거래수", side="left"), yaxis2=dict(title="PnL", side="right", overlaying="y"),
             xaxis_title="시간 (KST)", legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1), barmode="overlay")
-        st.plotly_chart(fig_h, use_container_width=True)
+        st.plotly_chart(fig_h, width="stretch")
 
     # ── PnL 분포 ─────────────────────────────────
     st.markdown('<div class="section-hdr">개별 거래 PnL 분포</div>', unsafe_allow_html=True)
@@ -533,14 +533,14 @@ with tab_dashboard:
     fig_hist = go.Figure(go.Bar(x=_mids, y=_counts, width=_bin_size * 0.9, marker_color=_colors, showlegend=False,
         hovertemplate="PnL: %{x:,.0f}<br>빈도: %{y}<extra></extra>"))
     fig_hist.update_layout(**_CHART, xaxis_title="PnL (USDT)", yaxis_title="빈도", bargap=0.05)
-    st.plotly_chart(fig_hist, use_container_width=True)
+    st.plotly_chart(fig_hist, width="stretch")
 
     # ── 거래 내역 ────────────────────────────────
     st.markdown('<div class="section-hdr">거래 내역</div>', unsafe_allow_html=True)
     with st.expander(f"전체 거래 내역 ({len(df)}건)", expanded=False):
         fdf = df.copy()
         fdf["datetime"] = fdf["datetime"].astype(str)
-        st.dataframe(fdf.sort_values("datetime", ascending=False).reset_index(drop=True), use_container_width=True, height=420)
+        st.dataframe(fdf.sort_values("datetime", ascending=False).reset_index(drop=True), width="stretch", height=420)
 
     with st.expander("수동 거래 추가", expanded=False):
         with st.form("add_trade"):
@@ -560,7 +560,7 @@ with tab_dashboard:
             with r2x[1]: add_hold = st.number_input("보유(분)", min_value=1, value=60)
             with r2x[2]: add_type = st.selectbox("주문유형", ["MARKET", "LIMIT"], key="add_type")
             with r2x[3]: add_sl = st.checkbox("스탑로스")
-            if st.form_submit_button("추가", use_container_width=True):
+            if st.form_submit_button("추가", width="stretch"):
                 nid = st.session_state.trade_id_counter; st.session_state.trade_id_counter += 1
                 nr = pd.DataFrame([{"id": nid, "exchange": add_ex, "datetime": add_dt, "symbol": add_sym, "side": add_side,
                     "leverage": int(add_lev), "entry_price": add_entry, "exit_price": add_exit, "quantity_usdt": add_qty,
@@ -596,7 +596,7 @@ with tab_detail:
 
     _sc1, _sc2 = st.columns([1, 5])
     with _sc1:
-        st.button("AI 요약", use_container_width=True, type="primary",
+        st.button("AI 요약", width="stretch", type="primary",
                   disabled=not api_key_claude, key="btn_detail_summary", on_click=_run_detail_summary)
     with _sc2:
         if st.session_state.detail_summary:
@@ -663,7 +663,7 @@ with tab_detail:
         fig_hold.update_layout(**{**_CHART, "height": 80, "margin": dict(l=0, r=0, t=0, b=0)},
             barmode="stack", showlegend=False,
             xaxis=dict(visible=False, range=[0, 100]), yaxis=dict(visible=False))
-        st.plotly_chart(fig_hold, use_container_width=True)
+        st.plotly_chart(fig_hold, width="stretch")
 
         # 레버리지 분포
         _lev_bands = _deep.get("leverage_bands", [])
@@ -677,7 +677,7 @@ with tab_detail:
                     hovertemplate=f"레버리지 {lb['leverage_band']}<br>건당 평균: {lb['avg_pnl']:+.1f} USD<br>승률: {lb['win_rate']*100:.0f}%<extra></extra>"))
             fig_lev.update_layout(**{**_CHART, "height": 200, "margin": dict(l=40, r=10, t=8, b=36)},
                 xaxis_title="레버리지 구간", yaxis_title="건당 평균 PnL (USD)")
-            st.plotly_chart(fig_lev, use_container_width=True)
+            st.plotly_chart(fig_lev, width="stretch")
 
     # ══════════════════════════════════════════════
     # Section 2: 패턴 발견
@@ -712,7 +712,7 @@ with tab_detail:
             fig_ss.update_layout(**{**_CHART, "height": 280}, barmode="group",
                 yaxis_title="PnL (USD)", xaxis_title="",
                 legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
-            st.plotly_chart(fig_ss, use_container_width=True)
+            st.plotly_chart(fig_ss, width="stretch")
         else:
             st.caption("데이터 부족")
 
@@ -727,7 +727,7 @@ with tab_detail:
             showlegend=False, hovertemplate="KST %{x}시<br>PnL: %{y:,.0f} USD<extra></extra>"))
         fig_hr.update_layout(**{**_CHART, "height": 280}, xaxis_title="시간 (KST)", yaxis_title="PnL (USD)",
             xaxis=dict(dtick=2))
-        st.plotly_chart(fig_hr, use_container_width=True)
+        st.plotly_chart(fig_hr, width="stretch")
 
     # Row 2: 종목×요일 히트맵 + 보유시간별 성과
     col_p3, col_p4 = st.columns(2)
@@ -749,7 +749,7 @@ with tab_detail:
                 colorbar=dict(title="USD", thickness=12)))
             fig_hm.update_layout(**{**_CHART, "height": 280, "margin": dict(l=80, r=10, t=8, b=36)},
                 xaxis_title="", yaxis_title="")
-            st.plotly_chart(fig_hm, use_container_width=True)
+            st.plotly_chart(fig_hm, width="stretch")
         else:
             st.caption("데이터 부족")
 
@@ -766,7 +766,7 @@ with tab_detail:
                     hovertemplate=f"{h['hold_band']}<br>PnL: {h['pnl']:+,.0f} USD<br>승률: {h['win_rate']*100:.0f}%<extra></extra>"))
             fig_hb.update_layout(**{**_CHART, "height": 280, "margin": dict(l=40, r=10, t=8, b=36)},
                 yaxis_title="PnL (USD)")
-            st.plotly_chart(fig_hb, use_container_width=True)
+            st.plotly_chart(fig_hb, width="stretch")
         else:
             st.caption("데이터 부족")
 
@@ -1022,7 +1022,7 @@ with tab_whatif:
         fig_wf.update_layout(**{**_CHART, "height": 340},
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
             yaxis_title="USDT")
-        st.plotly_chart(fig_wf, use_container_width=True)
+        st.plotly_chart(fig_wf, width="stretch")
 
         # 차이 요약
         _diff_pnl = _after["pnl"] - _before["pnl"]
@@ -1121,7 +1121,7 @@ with tab_journal:
         fig_j.update_layout(**{**_CHART, "height": 280}, xaxis_title="", yaxis_title="PnL (USD)",
             yaxis2=dict(title="거래 수", side="right", overlaying="y"),
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
-        st.plotly_chart(fig_j, use_container_width=True)
+        st.plotly_chart(fig_j, width="stretch")
 
         # ── 요약 테이블 ────────────────────────────
         st.markdown(f'<div class="section-hdr">{_period_label} 상세</div>', unsafe_allow_html=True)
@@ -1219,7 +1219,7 @@ with tab_journal:
                             title=dict(text=_chart_title, font=dict(size=13, color="#7b7b9e")),
                             yaxis_title="가격", xaxis_title="",
                             xaxis_rangeslider_visible=False)
-                        st.plotly_chart(fig_candle, use_container_width=True)
+                        st.plotly_chart(fig_candle, width="stretch")
 
                     if not _has_exchange and is_any_connected():
                         st.caption(f"캔들 데이터를 가져올 수 없습니다. ({_tf_label})")
@@ -1230,4 +1230,4 @@ with tab_journal:
                     _show = _period_trades[["datetime", "symbol", "side", "entry_price", "exit_price", "leverage", "pnl_usdt", "fee_usdt", "holding_minutes"]].copy()
                     _show["datetime"] = _show["datetime"].astype(str)
                     _show.columns = ["시간", "종목", "방향", "진입가", "청산가", "레버리지", "PnL", "수수료", "보유(분)"]
-                    st.dataframe(_show.sort_values("시간", ascending=False), use_container_width=True, height=200)
+                    st.dataframe(_show.sort_values("시간", ascending=False), width="stretch", height=200)
