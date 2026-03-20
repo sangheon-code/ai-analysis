@@ -117,104 +117,16 @@ _EX_COLOR = {"Binance": "#F0B90B", "Bybit": "#FF6500", "OKX": "#00C8FF", "Bitget
 
 
 # ══════════════════════════════════════════════════
-# SIDEBAR
+# SIDEBAR (AI 챗만)
 # ══════════════════════════════════════════════════
 with st.sidebar:
     st.markdown("# KNOAH")
     st.caption("Trading Analysis Platform")
 
     st.markdown("---")
-    st.markdown("### 🔗 거래소")
-    if st.session_state.connections:
-        for ex_name, info in list(st.session_state.connections.items()):
-            c1, c2, c3 = st.columns([2, 2, 1])
-            with c1: st.markdown(f'<span class="conn-dot on"></span> **{ex_name}**', unsafe_allow_html=True)
-            with c2: st.caption(f"${info.get('balance', 0):,.2f}")
-            with c3:
-                if st.button("✕", key=f"rm_{ex_name}"):
-                    del st.session_state.connections[ex_name]
-                    if not st.session_state.trades.empty and "exchange" in st.session_state.trades.columns:
-                        st.session_state.trades = st.session_state.trades[st.session_state.trades["exchange"] != ex_name].reset_index(drop=True)
-                    st.session_state.ai_deep_report = None
-                    st.rerun()
-
-    with st.expander("➕ 거래소 추가", expanded=not is_any_connected()):
-        if not HAS_CCXT: st.warning("`pip install ccxt` 필요")
-        exchange_name = st.selectbox("거래소", EXCHANGES, key="sel_exchange")
-        api_key_exchange = st.text_input("API Key", type="password", key="api_key_exchange")
-        api_secret = st.text_input("API Secret", type="password", key="api_secret")
-        passphrase = None
-        if exchange_name in ("OKX", "Bitget"):
-            passphrase = st.text_input("Passphrase", type="password", key="passphrase")
-        if st.button("🔗 연결", width="stretch", disabled=not HAS_CCXT):
-            if api_key_exchange and api_secret:
-                with st.spinner(f"{exchange_name} 연결 중..."):
-                    try:
-                        ex = create_exchange(exchange_name, api_key_exchange, api_secret, passphrase)
-                        result = test_connection(ex)
-                        if result["ok"]:
-                            st.session_state.connections[exchange_name] = {"instance": ex, "balance": result.get("total_usdt", 0), "msg": result["msg"]}
-                            st.success(f"{exchange_name} 연결!")
-                            st.rerun()
-                        else: st.error(result["msg"])
-                    except Exception as e: st.error(str(e))
-            else: st.warning("API Key/Secret 필요")
-
-    if is_any_connected():
-        st.markdown("---")
-        fetch_days = st.number_input("조회 기간(일)", 7, 1095, 90, key="fetch_days")
-        fetch_targets = st.multiselect("대상", connected_exchanges(), default=connected_exchanges(), key="ft")
-        if st.button("📥 거래 내역 가져오기", width="stretch", type="primary"):
-            total = 0
-            for en in fetch_targets:
-                info = st.session_state.connections[en]
-                with st.spinner(f"{en}..."):
-                    try:
-                        tdf = exchange_fetch_trades(info["instance"], en, days=fetch_days)
-                        if not tdf.empty: merge_exchange_trades(tdf, en); total += len(tdf)
-                        ddf = fetch_deposits_withdrawals(info["instance"], days=fetch_days)
-                        if not ddf.empty: merge_exchange_deposits(ddf, en)
-                        st.success(f"{en}: {len(tdf)}건")
-                    except Exception as e: st.error(f"{en}: {e}")
-            if total > 0: st.session_state.ai_deep_report = None; st.rerun()
-
-    st.markdown("---")
-    st.markdown("### 🎲 더미 데이터")
-    c_a, c_b = st.columns(2)
-    with c_a: n_trades = st.number_input("건수", 10, 500, 100, step=10, key="n_trades")
-    with c_b: n_days = st.number_input("기간(일)", 7, 90, 30, step=7, key="n_days")
-    dummy_exchanges = st.multiselect("거래소", EXCHANGES, default=["Binance"], key="dummy_ex")
-    ex_balances = {}
-    for dex in (dummy_exchanges or ["Binance"]):
-        ex_balances[dex] = st.number_input(f"{dex} 초기 잔고(USDT)", 100, 1_000_000, 10_000, step=1000, key=f"bal_{dex}")
-
-    if st.button("더미 데이터 생성", width="stretch"):
-        all_t, all_d = [], []
-        exes = dummy_exchanges or ["Binance"]
-        per_n = max(n_trades // len(exes), 10)
-        for i, en in enumerate(exes):
-            all_t.append(generate_trades(per_n, en, n_days, start_id=i * per_n))
-            dep = generate_deposits(ex_balances.get(en, 10_000))
-            dep.insert(1, "exchange", en)
-            all_d.append(dep)
-        combined = pd.concat(all_t, ignore_index=True).sort_values("datetime").reset_index(drop=True)
-        combined["id"] = range(len(combined))
-        st.session_state.trades = combined
-        st.session_state.deposits = pd.concat(all_d, ignore_index=True).reset_index(drop=True)
-        st.session_state.trade_id_counter = len(combined)
-        st.session_state.ai_deep_report = None
-        st.rerun()
-
-    if st.button("🗑 초기화", width="stretch"):
-        for k in ["trades", "deposits", "ai_deep_report", "trade_id_counter"]:
-            st.session_state[k] = _DEFAULTS[k]
-        st.rerun()
-
-    st.markdown("---")
 
     # ── AI 챗봇 ────────────────────────────────────
     st.markdown("### 💬 AI 챗")
-    # 대화 기록 표시
     for msg in st.session_state.chat_history:
         _role_icon = "🧑" if msg["role"] == "user" else "🤖"
         _bg = "rgba(107,138,255,0.08)" if msg["role"] == "user" else "rgba(0,0,0,0)"
@@ -261,11 +173,173 @@ has_data = not st.session_state.trades.empty
 conn_names = connected_exchanges()
 badges = " ".join(f'<span class="badge badge-success">{n}</span>' for n in conn_names) if conn_names else '<span class="badge badge-info">DEMO</span>'
 n_ex = int(st.session_state.trades["exchange"].nunique()) if has_data and "exchange" in st.session_state.trades.columns else 0
-st.markdown(f'{badges} &nbsp; 거래소 **{n_ex}개** · 거래 **{len(st.session_state.trades)}건**', unsafe_allow_html=True)
+_hdr1, _hdr2 = st.columns([4, 1])
+with _hdr1:
+    st.markdown(f'{badges} &nbsp; 거래소 **{n_ex}개** · 거래 **{len(st.session_state.trades)}건**', unsafe_allow_html=True)
+with _hdr2:
+    if has_data and st.button("🗑 초기화", key="reset_main"):
+        for k in ["trades", "deposits", "ai_deep_report", "trade_id_counter", "detail_summary"]:
+            if k in _DEFAULTS:
+                st.session_state[k] = _DEFAULTS[k]
+        st.session_state.connections = {}
+        st.rerun()
 
 if not has_data:
-    st.info("👈 사이드바에서 거래소를 연결하거나 더미 데이터를 생성해주세요.")
+    # ── 데이터 없을 때: 거래소 연결 / 더미 데이터 UI ──
+    col_conn, col_dummy = st.columns(2)
+
+    with col_conn:
+        st.markdown("### 🔗 거래소 연결")
+        if not HAS_CCXT:
+            st.warning("`pip install ccxt` 필요")
+        exchange_name = st.selectbox("거래소", EXCHANGES, key="sel_exchange")
+        api_key_exchange = st.text_input("API Key", type="password", key="api_key_exchange")
+        api_secret = st.text_input("API Secret", type="password", key="api_secret")
+        passphrase = None
+        if exchange_name in ("OKX", "Bitget"):
+            passphrase = st.text_input("Passphrase", type="password", key="passphrase")
+        if st.button("🔗 연결", width="stretch", disabled=not HAS_CCXT):
+            if api_key_exchange and api_secret:
+                with st.spinner(f"{exchange_name} 연결 중..."):
+                    try:
+                        ex = create_exchange(exchange_name, api_key_exchange, api_secret, passphrase)
+                        result = test_connection(ex)
+                        if result["ok"]:
+                            st.session_state.connections[exchange_name] = {"instance": ex, "balance": result.get("total_usdt", 0), "msg": result["msg"]}
+                            st.success(f"{exchange_name} 연결!")
+                            st.rerun()
+                        else:
+                            st.error(result["msg"])
+                    except Exception as e:
+                        st.error(str(e))
+            else:
+                st.warning("API Key/Secret 필요")
+
+        if is_any_connected():
+            st.markdown("---")
+            fetch_days = st.number_input("조회 기간(일)", 7, 1095, 90, key="fetch_days")
+            fetch_targets = st.multiselect("대상", connected_exchanges(), default=connected_exchanges(), key="ft")
+            if st.button("📥 거래 내역 가져오기", width="stretch", type="primary"):
+                total = 0
+                for en in fetch_targets:
+                    info = st.session_state.connections[en]
+                    with st.spinner(f"{en}..."):
+                        try:
+                            tdf = exchange_fetch_trades(info["instance"], en, days=fetch_days)
+                            if not tdf.empty:
+                                merge_exchange_trades(tdf, en)
+                                total += len(tdf)
+                            ddf = fetch_deposits_withdrawals(info["instance"], days=fetch_days)
+                            if not ddf.empty:
+                                merge_exchange_deposits(ddf, en)
+                            st.success(f"{en}: {len(tdf)}건")
+                        except Exception as e:
+                            st.error(f"{en}: {e}")
+                if total > 0:
+                    st.session_state.ai_deep_report = None
+                    st.rerun()
+
+    with col_dummy:
+        st.markdown("### 🎲 더미 데이터")
+        c_a, c_b = st.columns(2)
+        with c_a:
+            n_trades = st.number_input("건수", 10, 500, 100, step=10, key="n_trades")
+        with c_b:
+            n_days = st.number_input("기간(일)", 7, 90, 30, step=7, key="n_days")
+        dummy_exchanges = st.multiselect("거래소", EXCHANGES, default=["Binance"], key="dummy_ex")
+        ex_balances = {}
+        for dex in (dummy_exchanges or ["Binance"]):
+            ex_balances[dex] = st.number_input(f"{dex} 초기 잔고(USDT)", 100, 1_000_000, 10_000, step=1000, key=f"bal_{dex}")
+
+        if st.button("더미 데이터 생성", width="stretch"):
+            all_t, all_d = [], []
+            exes = dummy_exchanges or ["Binance"]
+            per_n = max(n_trades // len(exes), 10)
+            for i, en in enumerate(exes):
+                all_t.append(generate_trades(per_n, en, n_days, start_id=i * per_n))
+                dep = generate_deposits(ex_balances.get(en, 10_000))
+                dep.insert(1, "exchange", en)
+                all_d.append(dep)
+            combined = pd.concat(all_t, ignore_index=True).sort_values("datetime").reset_index(drop=True)
+            combined["id"] = range(len(combined))
+            st.session_state.trades = combined
+            st.session_state.deposits = pd.concat(all_d, ignore_index=True).reset_index(drop=True)
+            st.session_state.trade_id_counter = len(combined)
+            st.session_state.ai_deep_report = None
+            st.rerun()
+
     st.stop()
+
+# ── 거래소 관리 (expander) ────────────────────────
+with st.expander("거래소 관리 / 데이터 추가", expanded=False):
+    _mgr1, _mgr2 = st.columns(2)
+    with _mgr1:
+        # 연결된 거래소 표시
+        if st.session_state.connections:
+            for ex_name, info in list(st.session_state.connections.items()):
+                c1, c2, c3 = st.columns([2, 2, 1])
+                with c1:
+                    st.markdown(f'<span class="conn-dot on"></span> **{ex_name}**', unsafe_allow_html=True)
+                with c2:
+                    st.caption(f"${info.get('balance', 0):,.2f}")
+                with c3:
+                    if st.button("✕", key=f"rm_{ex_name}"):
+                        del st.session_state.connections[ex_name]
+                        if not st.session_state.trades.empty and "exchange" in st.session_state.trades.columns:
+                            st.session_state.trades = st.session_state.trades[st.session_state.trades["exchange"] != ex_name].reset_index(drop=True)
+                        st.session_state.ai_deep_report = None
+                        st.rerun()
+
+        # 새 거래소 추가
+        exchange_name = st.selectbox("거래소", EXCHANGES, key="sel_exchange_main")
+        api_key_exchange = st.text_input("API Key", type="password", key="api_key_ex_main")
+        api_secret = st.text_input("API Secret", type="password", key="api_secret_main")
+        passphrase = None
+        if exchange_name in ("OKX", "Bitget"):
+            passphrase = st.text_input("Passphrase", type="password", key="passphrase_main")
+        if st.button("🔗 연결", key="connect_main", width="stretch", disabled=not HAS_CCXT):
+            if api_key_exchange and api_secret:
+                with st.spinner(f"{exchange_name} 연결 중..."):
+                    try:
+                        ex = create_exchange(exchange_name, api_key_exchange, api_secret, passphrase)
+                        result = test_connection(ex)
+                        if result["ok"]:
+                            st.session_state.connections[exchange_name] = {"instance": ex, "balance": result.get("total_usdt", 0), "msg": result["msg"]}
+                            st.success(f"{exchange_name} 연결!")
+                            st.rerun()
+                        else:
+                            st.error(result["msg"])
+                    except Exception as e:
+                        st.error(str(e))
+            else:
+                st.warning("API Key/Secret 필요")
+
+    with _mgr2:
+        if is_any_connected():
+            st.markdown("**거래 내역 가져오기**")
+            fetch_days = st.number_input("조회 기간(일)", 7, 1095, 90, key="fetch_days_main")
+            fetch_targets = st.multiselect("대상", connected_exchanges(), default=connected_exchanges(), key="ft_main")
+            if st.button("📥 가져오기", key="fetch_main", width="stretch", type="primary"):
+                total = 0
+                for en in fetch_targets:
+                    info = st.session_state.connections[en]
+                    with st.spinner(f"{en}..."):
+                        try:
+                            tdf = exchange_fetch_trades(info["instance"], en, days=fetch_days)
+                            if not tdf.empty:
+                                merge_exchange_trades(tdf, en)
+                                total += len(tdf)
+                            ddf = fetch_deposits_withdrawals(info["instance"], days=fetch_days)
+                            if not ddf.empty:
+                                merge_exchange_deposits(ddf, en)
+                            st.success(f"{en}: {len(tdf)}건")
+                        except Exception as e:
+                            st.error(f"{en}: {e}")
+                if total > 0:
+                    st.session_state.ai_deep_report = None
+                    st.rerun()
+        else:
+            st.info("거래소를 연결하면 데이터를 가져올 수 있습니다.")
 
 # ── 거래소 필터 ──────────────────────────────────
 avail_ex = sorted(st.session_state.trades["exchange"].unique().tolist()) if "exchange" in st.session_state.trades.columns else []
