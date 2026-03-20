@@ -19,17 +19,18 @@ from lib.config import (
     CUSTOM_CSS, TRADE_COLUMNS, DEPOSIT_COLUMNS,
 )
 from lib.dummy import generate_trades, generate_deposits
-from lib.analysis import aggregate_data, aggregate_deep_data, call_claude_deep_report, get_api_balance
+from lib.analysis import aggregate_data, aggregate_deep_data, chat_with_data, generate_detail_summary
 
 try:
     from lib.exchanges import (
         ccxt, create_exchange, test_connection,
         fetch_trades as exchange_fetch_trades,
-        fetch_deposits_withdrawals,
+        fetch_deposits_withdrawals, fetch_ohlcv,
     )
     HAS_CCXT = ccxt is not None
 except ImportError:
     HAS_CCXT = False
+    fetch_ohlcv = None
 
 
 # ══════════════════════════════════════════════════
@@ -38,14 +39,17 @@ except ImportError:
 st.set_page_config(page_title="KNOAH Trading Analysis", page_icon="📊", layout="wide", initial_sidebar_state="expanded")
 st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 st.markdown("""<style>
-.deep-report { background: linear-gradient(135deg, #0f0f1a 0%, #151525 100%);
-    border: 1px solid #1e1e35; border-radius: 14px; padding: 28px 32px;
-    line-height: 1.9; font-size: 14px; }
-.deep-report h3 { color: #a78bfa; margin-top: 28px; font-size: 17px; border-bottom: 1px solid #1e1e35; padding-bottom: 8px; }
-.deep-report strong { color: #e8e8ed; }
-.deep-report table { width: 100%; border-collapse: collapse; margin: 12px 0; }
-.deep-report th, .deep-report td { padding: 6px 12px; border: 1px solid #1e1e35; font-size: 13px; }
-.deep-report th { background: #1a1a2e; color: #7b7b9e; }
+.style-card { background: linear-gradient(135deg, #0f0f1a 0%, #151525 100%);
+    border: 1px solid #1e1e35; border-radius: 14px; padding: 24px 28px; }
+.habit-card { background: linear-gradient(135deg, #0f0f1a 0%, #151525 100%);
+    border: 1px solid #1e1e35; border-radius: 14px; padding: 20px 24px; text-align: center; }
+.habit-card .val { font-family: JetBrains Mono; font-size: 28px; font-weight: 700; margin: 8px 0 4px; }
+.habit-card .lbl { font-size: 11px; color: #7b7b9e; text-transform: uppercase; letter-spacing: 1px; }
+.habit-card .sub { font-size: 13px; margin-top: 6px; }
+.action-card { background: linear-gradient(135deg, #0f0f1a 0%, #151525 100%);
+    border: 1px solid #1e1e35; border-radius: 14px; padding: 24px 28px; line-height: 1.8; font-size: 14px; }
+.action-card h3 { color: #a78bfa; margin-top: 20px; font-size: 16px; }
+.action-card strong { color: #e8e8ed; }
 </style>""", unsafe_allow_html=True)
 
 
@@ -58,6 +62,9 @@ _DEFAULTS = {
     "ai_deep_report": None,
     "trade_id_counter": 0,
     "connections": {},
+    "chat_history": [],
+    "chat_total_cost": 0.0,
+    "detail_summary": None,
 }
 for k, v in _DEFAULTS.items():
     if k not in st.session_state:
@@ -204,6 +211,35 @@ with st.sidebar:
         st.rerun()
 
     st.markdown("---")
+
+    # ── AI 챗봇 ────────────────────────────────────
+    st.markdown("### 💬 AI 챗")
+    # 대화 기록 표시
+    for msg in st.session_state.chat_history:
+        _role_icon = "🧑" if msg["role"] == "user" else "🤖"
+        _bg = "rgba(107,138,255,0.08)" if msg["role"] == "user" else "rgba(0,0,0,0)"
+        st.markdown(f'<div style="background:{_bg};border-radius:8px;padding:6px 10px;margin:4px 0;font-size:13px">'
+            f'{_role_icon} {msg["content"].replace("$", "USD ")}</div>', unsafe_allow_html=True)
+
+    _chat_input = st.text_input("질문", placeholder="거래 데이터에 대해 질문...", key="sidebar_chat_input", label_visibility="collapsed")
+    if _chat_input and st.session_state.get("_last_chat_input") != _chat_input:
+        st.session_state._last_chat_input = _chat_input
+        st.session_state.chat_history.append({"role": "user", "content": _chat_input})
+        st.session_state._chat_pending = True
+        st.rerun()
+
+    if st.session_state.chat_history:
+        _ch1, _ch2 = st.columns(2)
+        with _ch1:
+            st.caption(f"{len(st.session_state.chat_history)//2}회 · ${st.session_state.chat_total_cost:.4f}")
+        with _ch2:
+            if st.button("초기화", key="chat_clear", use_container_width=True):
+                st.session_state.chat_history = []
+                st.session_state.chat_total_cost = 0.0
+                st.session_state._last_chat_input = ""
+                st.rerun()
+
+    st.markdown("---")
     st.markdown("<div style='text-align:center;color:#55556a;font-size:11px'>KNOAH v1.0 · Powered by Claude</div>", unsafe_allow_html=True)
 
 
@@ -332,10 +368,27 @@ else:
     _total_init = eb
 
 
+# ── 사이드바 챗봇 응답 처리 ─────────────────────────
+if st.session_state.get("_chat_pending") and api_key_claude and has_data:
+    st.session_state._chat_pending = False
+    _chat_q = st.session_state.chat_history[-1]["content"] if st.session_state.chat_history else ""
+    if _chat_q:
+        try:
+            _basic_chat = aggregate_data(df, st.session_state.deposits, "통합")
+            _deep_chat = aggregate_deep_data(df, st.session_state.deposits)
+            _recent = st.session_state.chat_history[-7:-1]
+            result = chat_with_data(_chat_q, _basic_chat, _deep_chat, _recent, api_key_claude)
+            st.session_state.chat_history.append({"role": "assistant", "content": result["answer"]})
+            st.session_state.chat_total_cost += result["cost_usd"]
+        except Exception as e:
+            st.session_state.chat_history.append({"role": "assistant", "content": f"오류: {e}"})
+        st.rerun()
+
+
 # ══════════════════════════════════════════════════
-# TABS: 대시보드 | AI Report
+# TABS
 # ══════════════════════════════════════════════════
-tab_dashboard, tab_ai = st.tabs(["대시보드", "AI Report"])
+tab_dashboard, tab_detail, tab_whatif, tab_journal = st.tabs(["대시보드", "상세 분석", "What-if", "매매 일지"])
 
 
 # ══════════════════════════════════════════════════
@@ -519,60 +572,662 @@ with tab_dashboard:
 # ══════════════════════════════════════════════════
 # TAB 2: AI Report
 # ══════════════════════════════════════════════════
-with tab_ai:
-    st.markdown("### AI Deep Report")
-    st.caption("Claude가 교차 분석 데이터를 기반으로 숨은 패턴, 심리 분석, 맞춤 전략을 제공합니다.")
+with tab_detail:
+    # ── 교차 분석 데이터 계산 ──────────────────────
+    _deep = aggregate_deep_data(df, st.session_state.deposits)
 
-    if not api_key_claude:
-        st.warning("사이드바에서 Claude API Key를 입력해주세요.")
-    elif len(df) < 10:
-        st.warning("거래 데이터가 10건 미만입니다. 더 많은 데이터가 있으면 분석 정확도가 올라갑니다.")
+    if not _deep:
+        st.info("데이터가 부족합니다.")
+        st.stop()
 
-    def _run_deep_report():
+    # ── AI 요약 (Haiku) ──────────────────────────
+    def _run_detail_summary():
         _key = os.getenv("ANTHROPIC_API_KEY", "")
         if not _key:
             try: _key = st.secrets.get("ANTHROPIC_API_KEY", "")
             except Exception: _key = ""
-        if not _key:
-            st.session_state.ai_deep_report = "API 키가 설정되지 않았습니다."
-            return
+        if not _key: return
         try:
-            _df = st.session_state.trades.copy()
-            _deps = st.session_state.deposits
-            _basic = aggregate_data(_df, _deps, "통합")
-            _deep = aggregate_deep_data(_df, _deps)
-            result = call_claude_deep_report(_basic, _deep, _key)
-            st.session_state.ai_deep_report = result["report"]
-            st.session_state.ai_last_cost = result
+            _basic = aggregate_data(st.session_state.trades.copy(), st.session_state.deposits, "통합")
+            result = generate_detail_summary(_basic, _deep, _key)
+            st.session_state.detail_summary = result["summary"]
         except Exception as e:
-            import traceback
-            st.session_state.ai_deep_report = f"리포트 생성 실패: {type(e).__name__}: {e}\n```\n{traceback.format_exc()[-500:]}\n```"
-            st.session_state.ai_last_cost = None
+            st.session_state.detail_summary = f"요약 생성 실패: {e}"
 
-    # API 잔고 조회
-    _balance_info = None
-    if api_key_claude:
-        _balance_info = get_api_balance(api_key_claude)
+    _sc1, _sc2 = st.columns([1, 5])
+    with _sc1:
+        st.button("AI 요약", use_container_width=True, type="primary",
+                  disabled=not api_key_claude, key="btn_detail_summary", on_click=_run_detail_summary)
+    with _sc2:
+        if st.session_state.detail_summary:
+            st.markdown(f'<div style="background:linear-gradient(135deg,#0f0f1a,#151525);border:1px solid #1e1e35;'
+                f'border-radius:10px;padding:14px 20px;font-size:14px;line-height:1.8">'
+                f'{st.session_state.detail_summary.replace("$", "USD ")}</div>', unsafe_allow_html=True)
+        else:
+            st.caption("AI가 상세 분석 데이터를 요약합니다. (Haiku, 약 $0.002)")
 
-    col_btn, col_info = st.columns([1, 3])
-    with col_btn:
-        st.button("리포트 생성", use_container_width=True, type="primary",
-                  disabled=not api_key_claude or len(df) < 1, key="btn_deep_report", on_click=_run_deep_report)
-    with col_info:
-        info_parts = ["Claude Sonnet · 약 10~15초 소요"]
-        if _balance_info and _balance_info["ok"]:
-            info_parts.append(f"잔고: {_balance_info['balance']}")
-        info_parts.append("회당 약 \\$0.01-0.05")
-        last = st.session_state.get("ai_last_cost")
-        if last and isinstance(last, dict):
-            info_parts.append(f"마지막: {last['input_tokens']+last['output_tokens']:,}토큰 \\${last['cost_usd']:.4f}")
-        st.caption(" · ".join(info_parts))
+    # ══════════════════════════════════════════════
+    # Section 1: 매매 스타일
+    # ══════════════════════════════════════════════
+    st.markdown('<div class="section-hdr">매매 스타일</div>', unsafe_allow_html=True)
 
-    if st.session_state.ai_deep_report:
-        # $를 USD로 치환 (LaTeX 해석 방지 + 마크다운 깨짐 방지)
-        safe = st.session_state.ai_deep_report.replace("$", "USD ")
-        st.markdown("---")
-        st.markdown(safe)
-        st.divider()
-        st.download_button("리포트 다운로드 (.md)", data=st.session_state.ai_deep_report,
-            file_name=f"knoah_deep_report_{datetime.now().strftime('%Y%m%d_%H%M')}.md", mime="text/markdown", use_container_width=True)
+    # 스타일 판별
+    _hold_bands = {h["hold_band"]: h["trades"] for h in _deep.get("holding_time_bands", [])}
+    _total_ht = sum(_hold_bands.values()) or 1
+    _style_map = {"스캘핑(<10분)": "Scalper", "데이트레이딩(10분-1일)": "Day Trader",
+                  "스윙(1일-30일)": "Swing Trader", "장기(30일+)": "Position Trader"}
+    _dominant = max(_hold_bands, key=_hold_bands.get) if _hold_bands else "데이트레이딩(10분-1일)"
+    _style_label = _style_map.get(_dominant, "Day Trader")
+    _dominant_pct = round(_hold_bands.get(_dominant, 0) / _total_ht * 100)
+    _is_mixed = _dominant_pct < 50
+
+    _day_groups = df.groupby(df["datetime"].dt.date).size()
+    _trades_per_day = round(float(_day_groups.mean()), 1)
+    _avg_hold = float(df["holding_minutes"].mean())
+    if _avg_hold < 10: _hold_str = f"{_avg_hold:.1f}분"
+    elif _avg_hold < 60: _hold_str = f"{_avg_hold:.0f}분"
+    elif _avg_hold < 1440: _hold_str = f"{_avg_hold / 60:.1f}시간"
+    else: _hold_str = f"{_avg_hold / 1440:.1f}일"
+
+    _style_color = {"Scalper": "#ff4d6a", "Day Trader": "#6b8aff", "Swing Trader": "#a78bfa", "Position Trader": "#00e59b"}
+
+    col_style, col_dist = st.columns([2, 3])
+    with col_style:
+        _sc = _style_color.get(_style_label, "#6b8aff")
+        _mix_tag = ' <span style="color:#ffbb33;font-size:12px">(혼합형)</span>' if _is_mixed else ""
+        st.markdown(f"""<div class="style-card">
+          <div style="font-size:11px;color:#7b7b9e;text-transform:uppercase;letter-spacing:1.5px">Trading Style</div>
+          <div style="font-size:32px;font-weight:700;color:{_sc};margin:8px 0">{_style_label}{_mix_tag}</div>
+          <div style="display:flex;gap:24px;margin-top:12px">
+            <div><span style="color:#7b7b9e;font-size:11px">평균 보유</span><br><span style="font-family:JetBrains Mono;font-size:18px;font-weight:600">{_hold_str}</span></div>
+            <div><span style="color:#7b7b9e;font-size:11px">일 평균 거래</span><br><span style="font-family:JetBrains Mono;font-size:18px;font-weight:600">{_trades_per_day}건</span></div>
+            <div><span style="color:#7b7b9e;font-size:11px">평균 레버리지</span><br><span style="font-family:JetBrains Mono;font-size:18px;font-weight:600">{avg_lev:.1f}x</span></div>
+          </div>
+        </div>""", unsafe_allow_html=True)
+
+    with col_dist:
+        # 보유시간 분포 바
+        _band_labels = ["스캘핑(<10분)", "데이트레이딩(10분-1일)", "스윙(1일-30일)", "장기(30일+)"]
+        _band_short = ["스캘핑", "데이트레이딩", "스윙", "장기"]
+        _band_colors = ["#ff4d6a", "#6b8aff", "#a78bfa", "#00e59b"]
+        _band_vals = [_hold_bands.get(b, 0) for b in _band_labels]
+        _band_pcts = [v / _total_ht * 100 for v in _band_vals]
+
+        fig_hold = go.Figure()
+        for i, (lbl, pct, clr) in enumerate(zip(_band_short, _band_pcts, _band_colors)):
+            if pct > 0:
+                fig_hold.add_trace(go.Bar(x=[pct], y=[""], orientation="h", name=lbl,
+                    marker_color=clr, text=f"{lbl} {pct:.0f}%" if pct > 8 else "",
+                    textposition="inside", textfont=dict(size=11, color="white"),
+                    hovertemplate=f"{lbl}: {pct:.1f}% ({_band_vals[i]}건)<extra></extra>"))
+        fig_hold.update_layout(**{**_CHART, "height": 80, "margin": dict(l=0, r=0, t=0, b=0)},
+            barmode="stack", showlegend=False,
+            xaxis=dict(visible=False, range=[0, 100]), yaxis=dict(visible=False))
+        st.plotly_chart(fig_hold, use_container_width=True)
+
+        # 레버리지 분포
+        _lev_bands = _deep.get("leverage_bands", [])
+        if _lev_bands:
+            fig_lev = go.Figure()
+            for lb in _lev_bands:
+                clr = _C["profit"] if lb["avg_pnl"] >= 0 else _C["loss"]
+                fig_lev.add_trace(go.Bar(x=[lb["leverage_band"]], y=[lb["avg_pnl"]], name=lb["leverage_band"],
+                    marker_color=clr, text=f"승률 {lb['win_rate']*100:.0f}%<br>{lb['trades']}건",
+                    textposition="outside", textfont=dict(size=10), showlegend=False,
+                    hovertemplate=f"레버리지 {lb['leverage_band']}<br>건당 평균: {lb['avg_pnl']:+.1f} USD<br>승률: {lb['win_rate']*100:.0f}%<extra></extra>"))
+            fig_lev.update_layout(**{**_CHART, "height": 200, "margin": dict(l=40, r=10, t=8, b=36)},
+                xaxis_title="레버리지 구간", yaxis_title="건당 평균 PnL (USD)")
+            st.plotly_chart(fig_lev, use_container_width=True)
+
+    # ══════════════════════════════════════════════
+    # Section 2: 패턴 발견
+    # ══════════════════════════════════════════════
+    st.markdown('<div class="section-hdr">패턴 발견</div>', unsafe_allow_html=True)
+
+    col_p1, col_p2 = st.columns(2)
+
+    # 종목 × 방향 성과
+    with col_p1:
+        st.caption("종목 x 방향 손익")
+        _sym_side_all = _deep.get("symbol_side_worst", []) + _deep.get("symbol_side_best", [])
+        if _sym_side_all:
+            _seen = set()
+            _sym_side_dedup = []
+            for s in _sym_side_all:
+                k = (s["symbol"], s["side"])
+                if k not in _seen:
+                    _seen.add(k)
+                    _sym_side_dedup.append(s)
+
+            fig_ss = go.Figure()
+            for side, clr in [("LONG", _C["profit"]), ("SHORT", _C["loss"])]:
+                side_data = [s for s in _sym_side_dedup if s["side"] == side]
+                fig_ss.add_trace(go.Bar(
+                    x=[s.get("symbol", "") for s in side_data],
+                    y=[s["pnl"] for s in side_data],
+                    name=side, marker_color=clr, opacity=0.85,
+                    text=[f"WR {s['win_rate']*100:.0f}%" for s in side_data],
+                    textposition="outside", textfont=dict(size=9),
+                    hovertemplate="%{x} " + side + "<br>PnL: %{y:,.0f} USD<extra></extra>"))
+            fig_ss.update_layout(**{**_CHART, "height": 280}, barmode="group",
+                yaxis_title="PnL (USD)", xaxis_title="",
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+            st.plotly_chart(fig_ss, use_container_width=True)
+        else:
+            st.caption("데이터 부족")
+
+    # 시간대별 성과 히트맵
+    with col_p2:
+        st.caption("시간대별 성과 (KST)")
+        _hr_pnl = df.groupby("hour_kst")["net_pnl"].sum().reindex(range(24), fill_value=0)
+
+        fig_hr = go.Figure()
+        _hr_colors = [_C["profit"] if v >= 0 else _C["loss"] for v in _hr_pnl.values]
+        fig_hr.add_trace(go.Bar(x=list(range(24)), y=_hr_pnl.values, marker_color=_hr_colors,
+            showlegend=False, hovertemplate="KST %{x}시<br>PnL: %{y:,.0f} USD<extra></extra>"))
+        fig_hr.update_layout(**{**_CHART, "height": 280}, xaxis_title="시간 (KST)", yaxis_title="PnL (USD)",
+            xaxis=dict(dtick=2))
+        st.plotly_chart(fig_hr, use_container_width=True)
+
+    # Row 2: 종목×요일 히트맵 + 보유시간별 성과
+    col_p3, col_p4 = st.columns(2)
+
+    with col_p3:
+        st.caption("종목 x 요일 손익 히트맵")
+        _day_order = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        _sym_day_pivot = df.pivot_table(index="symbol", columns=df["datetime"].dt.day_name().str[:3],
+            values="net_pnl", aggfunc="sum", fill_value=0).reindex(columns=_day_order, fill_value=0)
+        if not _sym_day_pivot.empty:
+            _zmax = max(abs(_sym_day_pivot.values.min()), abs(_sym_day_pivot.values.max()), 1)
+            fig_hm = go.Figure(go.Heatmap(
+                z=_sym_day_pivot.values, x=_day_order, y=_sym_day_pivot.index.tolist(),
+                colorscale=[[0, "#ff4d6a"], [0.5, "#1a1a2e"], [1, "#00e59b"]],
+                zmin=-_zmax, zmax=_zmax,
+                text=[[f"{v:+,.0f}" for v in row] for row in _sym_day_pivot.values],
+                texttemplate="%{text}", textfont=dict(size=10),
+                hovertemplate="%{y} %{x}<br>PnL: %{z:,.0f} USD<extra></extra>",
+                colorbar=dict(title="USD", thickness=12)))
+            fig_hm.update_layout(**{**_CHART, "height": 280, "margin": dict(l=80, r=10, t=8, b=36)},
+                xaxis_title="", yaxis_title="")
+            st.plotly_chart(fig_hm, use_container_width=True)
+        else:
+            st.caption("데이터 부족")
+
+    with col_p4:
+        st.caption("보유시간별 성과")
+        _hb = _deep.get("holding_time_bands", [])
+        if _hb:
+            fig_hb = go.Figure()
+            for h in _hb:
+                clr = _C["profit"] if h["pnl"] >= 0 else _C["loss"]
+                fig_hb.add_trace(go.Bar(x=[h["hold_band"].split("(")[0]], y=[h["pnl"]], marker_color=clr,
+                    text=f"WR {h['win_rate']*100:.0f}%<br>{h['trades']}건",
+                    textposition="outside", textfont=dict(size=10), showlegend=False,
+                    hovertemplate=f"{h['hold_band']}<br>PnL: {h['pnl']:+,.0f} USD<br>승률: {h['win_rate']*100:.0f}%<extra></extra>"))
+            fig_hb.update_layout(**{**_CHART, "height": 280, "margin": dict(l=40, r=10, t=8, b=36)},
+                yaxis_title="PnL (USD)")
+            st.plotly_chart(fig_hb, use_container_width=True)
+        else:
+            st.caption("데이터 부족")
+
+    # ══════════════════════════════════════════════
+    # Section 3: 매매 습관
+    # ══════════════════════════════════════════════
+    st.markdown('<div class="section-hdr">매매 습관</div>', unsafe_allow_html=True)
+
+    _revenge = _deep.get("revenge_trading", {})
+    _tilt = _deep.get("post_tilt_behavior", {})
+    _winstreak = _deep.get("post_win_streak", {})
+    _holdcomp = _deep.get("holding_comparison", {})
+
+    col_h1, col_h2, col_h3, col_h4 = st.columns(4)
+
+    with col_h1:
+        _rv_count = _revenge.get("count", 0)
+        _rv_pnl = _revenge.get("total_pnl", 0)
+        _rv_esc = _revenge.get("escalated_pct", 0)
+        _rv_color = _C["loss"] if _rv_pnl < 0 else _C["profit"]
+        st.markdown(f"""<div class="habit-card">
+          <div class="lbl">복수매매</div>
+          <div class="val" style="color:{_rv_color}">{_rv_count}건</div>
+          <div class="sub" style="color:{_rv_color}">PnL {_rv_pnl:+,.0f} USD</div>
+          <div class="sub" style="color:#7b7b9e">에스컬레이션 {_rv_esc:.0f}%</div>
+        </div>""", unsafe_allow_html=True)
+
+    with col_h2:
+        _tilt_cnt = _tilt.get("tilt_count", 0)
+        _tilt_pnl = _tilt.get("avg_next_pnl", 0)
+        _tilt_lev = _tilt.get("avg_next_leverage", 0)
+        _tc = _C["profit"] if _tilt_pnl >= 0 else _C["loss"]
+        st.markdown(f"""<div class="habit-card">
+          <div class="lbl">연패 후 반응</div>
+          <div class="val" style="color:{_tc}">{_tilt_cnt}회</div>
+          <div class="sub" style="color:{_tc}">다음 거래 평균 {_tilt_pnl:+,.1f} USD</div>
+          <div class="sub" style="color:#7b7b9e">레버리지 {_tilt_lev:.1f}x</div>
+        </div>""", unsafe_allow_html=True)
+
+    with col_h3:
+        _ws_cnt = _winstreak.get("count", 0)
+        _ws_pnl = _winstreak.get("avg_next_pnl", 0)
+        _wc = _C["profit"] if _ws_pnl >= 0 else _C["loss"]
+        st.markdown(f"""<div class="habit-card">
+          <div class="lbl">연승 후 반응</div>
+          <div class="val" style="color:{_wc}">{_ws_cnt}회</div>
+          <div class="sub" style="color:{_wc}">다음 거래 평균 {_ws_pnl:+,.1f} USD</div>
+        </div>""", unsafe_allow_html=True)
+
+    with col_h4:
+        _wh = _holdcomp.get("avg_win_hold_min", 0)
+        _lh = _holdcomp.get("avg_loss_hold_min", 0)
+        def _fmt_min(m):
+            if m < 60: return f"{m:.0f}분"
+            if m < 1440: return f"{m/60:.1f}시간"
+            return f"{m/1440:.1f}일"
+        _hold_diff_color = _C["loss"] if _lh > _wh * 1.5 else "#7b7b9e"
+        st.markdown(f"""<div class="habit-card">
+          <div class="lbl">보유시간 비교</div>
+          <div style="margin-top:12px">
+            <div style="color:{_C['profit']};font-family:JetBrains Mono;font-size:18px;font-weight:600">{_fmt_min(_wh)}</div>
+            <div style="color:#7b7b9e;font-size:11px">수익 거래 평균</div>
+          </div>
+          <div style="margin-top:8px">
+            <div style="color:{_hold_diff_color};font-family:JetBrains Mono;font-size:18px;font-weight:600">{_fmt_min(_lh)}</div>
+            <div style="color:#7b7b9e;font-size:11px">손실 거래 평균</div>
+          </div>
+        </div>""", unsafe_allow_html=True)
+
+
+
+# ══════════════════════════════════════════════════
+# TAB 3: What-if 시뮬레이션
+# ══════════════════════════════════════════════════
+with tab_whatif:
+    st.markdown("### What-if 시뮬레이션")
+    st.caption("특정 조건의 거래를 제외했을 때 성과가 어떻게 달라지는지 확인합니다.")
+
+    wf = df.copy()
+
+    # ── 최적 조합 계산 (디폴트 추천) ─────────────────
+    _base_pnl = float(wf["net_pnl"].sum())
+
+    # ── 최적 조합 탐색: 각 필터를 개별 적용해서 PnL 개선되는 것만 디폴트 ──
+
+    # 방향: 제외 시 PnL이 개선되는 경우만
+    _def_side = []
+    for side in ["LONG", "SHORT"]:
+        if float(wf[wf["side"] != side]["net_pnl"].sum()) > _base_pnl:
+            _def_side.append(side)
+    # 둘 다 제외하면 0건이므로 더 효과 큰 1개만
+    if len(_def_side) == 2:
+        _side_gains = {s: float(wf[wf["side"] != s]["net_pnl"].sum()) - _base_pnl for s in _def_side}
+        _def_side = [max(_side_gains, key=_side_gains.get)]
+
+    # 종목: 해당 종목이 순손실인 것만
+    _sym_pnl = wf.groupby("symbol")["net_pnl"].sum()
+    _def_sym = sorted(_sym_pnl[_sym_pnl < 0].index.tolist(), key=lambda s: float(_sym_pnl[s]))
+
+    # 시간대: 순손실 시간대 상위 3개
+    _hr_pnl_wf = wf.groupby("hour_kst")["net_pnl"].sum()
+    _loss_hrs = _hr_pnl_wf[_hr_pnl_wf < 0].nsmallest(3)
+    _def_hrs = sorted([int(h) for h in _loss_hrs.index.tolist()])
+
+    # 복수매매: 순손실인 경우만
+    _wf_sorted_all = wf.sort_values("datetime").reset_index()
+    _revenge_idx_all = set()
+    for i in range(1, len(_wf_sorted_all)):
+        prev, curr = _wf_sorted_all.iloc[i - 1], _wf_sorted_all.iloc[i]
+        gap = (curr["datetime"] - prev["datetime"]).total_seconds() / 60
+        if prev["pnl_usdt"] < 0 and gap <= 5:
+            _revenge_idx_all.add(curr["index"])
+    _revenge_pnl = float(wf.loc[wf.index.isin(_revenge_idx_all), "net_pnl"].sum()) if _revenge_idx_all else 0
+    _def_revenge = _revenge_pnl < 0
+
+    # 전체 조합 적용 시 오히려 악화되면 디폴트 비우기
+    _test = wf.copy()
+    if _def_side: _test = _test[~_test["side"].astype(str).isin(_def_side)]
+    if _def_sym: _test = _test[~_test["symbol"].astype(str).isin(_def_sym)]
+    if _def_hrs: _test = _test[~_test["hour_kst"].isin(_def_hrs)]
+    if _def_revenge and _revenge_idx_all: _test = _test[~_test.index.isin(_revenge_idx_all)]
+    if _test.empty or float(_test["net_pnl"].sum()) <= _base_pnl:
+        # 조합이 악화시키면 개별 최대 개선 항목만 남기기
+        _candidates = []
+        if _def_side:
+            _t = wf[~wf["side"].astype(str).isin(_def_side)]
+            if not _t.empty: _candidates.append(("side", float(_t["net_pnl"].sum()) - _base_pnl))
+        if _def_sym:
+            _t = wf[~wf["symbol"].astype(str).isin(_def_sym)]
+            if not _t.empty: _candidates.append(("sym", float(_t["net_pnl"].sum()) - _base_pnl))
+        if _def_hrs:
+            _t = wf[~wf["hour_kst"].isin(_def_hrs)]
+            if not _t.empty: _candidates.append(("hrs", float(_t["net_pnl"].sum()) - _base_pnl))
+        if _def_revenge and _revenge_idx_all:
+            _t = wf[~wf.index.isin(_revenge_idx_all)]
+            if not _t.empty: _candidates.append(("rev", float(_t["net_pnl"].sum()) - _base_pnl))
+        _best = max(_candidates, key=lambda x: x[1]) if _candidates else None
+        if not _best or _best[1] <= 0:
+            _def_side, _def_sym, _def_hrs, _def_revenge = [], [], [], False
+        else:
+            if _best[0] != "side": _def_side = []
+            if _best[0] != "sym": _def_sym = []
+            if _best[0] != "hrs": _def_hrs = []
+            if _best[0] != "rev": _def_revenge = False
+
+    # ── 필터 조건 ──────────────────────────────────
+    wf_c1, wf_c2, wf_c3, wf_c4, wf_c5 = st.columns(5)
+    with wf_c1:
+        wf_exclude_side = st.multiselect("방향 제외", ["LONG", "SHORT"], default=_def_side, key="wf_side")
+    with wf_c2:
+        wf_exclude_sym = st.multiselect("종목 제외", sorted(df["symbol"].unique().tolist()), default=_def_sym, key="wf_sym")
+    with wf_c3:
+        _hrs = list(range(24))
+        wf_exclude_hrs = st.multiselect("시간대 제외 (KST)", _hrs, default=_def_hrs, key="wf_hrs",
+            format_func=lambda x: f"{x}시")
+    with wf_c4:
+        _lev_options = sorted(wf["leverage"].unique().tolist())
+        wf_exclude_lev = st.multiselect("레버리지 제외", _lev_options, key="wf_lev",
+            format_func=lambda x: f"{int(x)}x")
+    with wf_c5:
+        wf_no_revenge = st.checkbox("복수매매 제외", value=_def_revenge, key="wf_revenge")
+
+    # 복수매매 인덱스 (체크 시만 적용)
+    _wf_sorted = wf.sort_values("datetime").reset_index()
+    _revenge_idx = set()
+    if wf_no_revenge:
+        for i in range(1, len(_wf_sorted)):
+            prev, curr = _wf_sorted.iloc[i - 1], _wf_sorted.iloc[i]
+            gap = (curr["datetime"] - prev["datetime"]).total_seconds() / 60
+            if prev["pnl_usdt"] < 0 and gap <= 5:
+                _revenge_idx.add(curr["index"])
+
+    # 필터 적용
+    wf_filtered = wf.copy()
+    if wf_exclude_side:
+        wf_filtered = wf_filtered[~wf_filtered["side"].astype(str).isin(wf_exclude_side)]
+    if wf_exclude_sym:
+        wf_filtered = wf_filtered[~wf_filtered["symbol"].astype(str).isin(wf_exclude_sym)]
+    if wf_exclude_hrs:
+        wf_filtered = wf_filtered[~wf_filtered["hour_kst"].isin(wf_exclude_hrs)]
+    if wf_exclude_lev:
+        wf_filtered = wf_filtered[~wf_filtered["leverage"].isin(wf_exclude_lev)]
+    if wf_no_revenge and _revenge_idx:
+        wf_filtered = wf_filtered[~wf_filtered.index.isin(_revenge_idx)]
+
+    _any_filter = bool(wf_exclude_side or wf_exclude_sym or wf_exclude_hrs or wf_exclude_lev or wf_no_revenge)
+    _removed = len(wf) - len(wf_filtered)
+
+    if _any_filter and _removed > 0:
+        st.info(f"{_removed}건 제외됨 ({len(wf)}건 → {len(wf_filtered)}건)")
+
+    # ── Before / After 비교 ────────────────────────
+    def _calc_stats(d):
+        if d.empty:
+            return {"trades": 0, "pnl": 0, "win_rate": 0, "pf": 0, "avg_win": 0, "avg_loss": 0}
+        w = d[d["pnl_usdt"] > 0]
+        l = d[d["pnl_usdt"] <= 0]
+        gp = float(w["net_pnl"].sum()) if len(w) > 0 else 0
+        gl = abs(float(l["net_pnl"].sum())) if len(l) > 0 else 1
+        return {
+            "trades": len(d),
+            "pnl": float(d["net_pnl"].sum()),
+            "win_rate": len(w) / len(d) * 100,
+            "pf": round(gp / gl, 2) if gl > 0 else 0,
+            "avg_win": float(w["net_pnl"].mean()) if len(w) > 0 else 0,
+            "avg_loss": float(l["net_pnl"].mean()) if len(l) > 0 else 0,
+        }
+
+    _before = _calc_stats(wf)
+    _after = _calc_stats(wf_filtered) if _any_filter else _before
+
+    def _delta(v1, v2, fmt=",.0f", suffix=""):
+        d = v2 - v1
+        if abs(d) < 0.01: return None
+        return f"{d:+{fmt}}{suffix}"
+
+    st.markdown('<div class="section-hdr">Before / After</div>', unsafe_allow_html=True)
+    mc1, mc2, mc3 = st.columns(3)
+    mc1.metric("총 PnL", f"${_after['pnl']:,.2f}",
+        delta=_delta(_before["pnl"], _after["pnl"], ",.2f") if _any_filter else None)
+    mc2.metric("승률", f"{_after['win_rate']:.1f}%",
+        delta=_delta(_before["win_rate"], _after["win_rate"], ".1f", "%") if _any_filter else None)
+    mc3.metric("수익 팩터", f"{_after['pf']}",
+        delta=_delta(_before["pf"], _after["pf"], ".2f") if _any_filter else None)
+
+    mc4, mc5, mc6 = st.columns(3)
+    mc4.metric("거래 수", f"{_after['trades']}건",
+        delta=f"{_after['trades'] - _before['trades']}건" if _any_filter and _removed > 0 else None)
+    mc5.metric("평균 수익", f"${_after['avg_win']:,.2f}",
+        delta=_delta(_before["avg_win"], _after["avg_win"], ",.2f") if _any_filter else None)
+    mc6.metric("평균 손실", f"${_after['avg_loss']:,.2f}",
+        delta=_delta(_before["avg_loss"], _after["avg_loss"], ",.2f") if _any_filter else None)
+
+    # ── Equity 비교 차트 ──────────────────────────
+    if _any_filter and len(wf_filtered) > 0:
+        st.markdown('<div class="section-hdr">자산 곡선 비교</div>', unsafe_allow_html=True)
+        _init = list(_ex_bal.values())[0] if len(_ex_bal) == 1 else sum(_ex_bal.values())
+
+        _wf_sorted_eq = wf.sort_values("datetime").copy()
+        _wf_sorted_eq["eq_before"] = _init + _wf_sorted_eq["net_pnl"].cumsum()
+        # After: 제외된 거래의 PnL을 0으로 처리 (같은 시간축 유지)
+        _excluded_idx = set(wf.index) - set(wf_filtered.index)
+        _wf_sorted_eq["pnl_after"] = _wf_sorted_eq["net_pnl"].copy()
+        _wf_sorted_eq.loc[_wf_sorted_eq.index.isin(_excluded_idx), "pnl_after"] = 0
+        _wf_sorted_eq["eq_after"] = _init + _wf_sorted_eq["pnl_after"].cumsum()
+
+        fig_wf = go.Figure()
+        fig_wf.add_trace(go.Scatter(x=_wf_sorted_eq["datetime"], y=_wf_sorted_eq["eq_before"],
+            mode="lines", name="Before", line=dict(color="#4a4a6a", width=1.5, dash="dot")))
+        fig_wf.add_trace(go.Scatter(x=_wf_sorted_eq["datetime"], y=_wf_sorted_eq["eq_after"],
+            mode="lines", name="After", line=dict(color=_C["profit"], width=2)))
+        fig_wf.add_hline(y=_init, line_dash="dash", line_color="#4a4a6a", line_width=1)
+        fig_wf.update_layout(**{**_CHART, "height": 340},
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            yaxis_title="USDT")
+        st.plotly_chart(fig_wf, use_container_width=True)
+
+        # 차이 요약
+        _diff_pnl = _after["pnl"] - _before["pnl"]
+        _diff_color = _C["profit"] if _diff_pnl > 0 else _C["loss"]
+        if _diff_pnl > 0:
+            _diff_msg = f"제외한 {_removed}건 때문에 ${_diff_pnl:,.2f} 손해 보고 있었습니다"
+        else:
+            _diff_msg = f"제외한 {_removed}건이 ${abs(_diff_pnl):,.2f} 벌어주고 있었습니다"
+        st.markdown(f'<div style="text-align:center;font-size:14px;color:{_diff_color};margin:8px 0">{_diff_msg}</div>',
+            unsafe_allow_html=True)
+
+
+# ══════════════════════════════════════════════════
+# TAB 4: 매매 일지
+# ══════════════════════════════════════════════════
+with tab_journal:
+    st.markdown("### 매매 일지")
+    st.caption("일별/주별 거래 요약과 특이사항을 자동으로 정리합니다.")
+
+    _jdf = df.copy()
+    _jdf["date"] = _jdf["datetime"].dt.date
+
+    # ── 주간 / 일간 토글 ──────────────────────────
+    _j_mode = st.radio("단위", ["일별", "주별"], horizontal=True, key="j_mode")
+
+    if _j_mode == "주별":
+        _jdf["period"] = _jdf["datetime"].dt.to_period("W").apply(lambda x: x.start_time.date())
+        _period_label = "주간"
+    else:
+        _jdf["period"] = _jdf["date"]
+        _period_label = "일별"
+
+    # ── 기간별 요약 테이블 ──────────────────────────
+    _j_groups = _jdf.groupby("period")
+
+    _j_summary = []
+    for period, grp in _j_groups:
+        wins = grp[grp["pnl_usdt"] > 0]
+        pnl = float(grp["net_pnl"].sum())
+        wr = len(wins) / len(grp) * 100 if len(grp) > 0 else 0
+
+        # 특이사항 감지
+        flags = []
+        # 복수매매
+        gs = grp.sort_values("datetime").reset_index(drop=True)
+        revenge_cnt = 0
+        for i in range(1, len(gs)):
+            gap = (gs.iloc[i]["datetime"] - gs.iloc[i-1]["datetime"]).total_seconds() / 60
+            if gs.iloc[i-1]["pnl_usdt"] < 0 and gap <= 5:
+                revenge_cnt += 1
+        if revenge_cnt >= 3:
+            flags.append(f"복수매매 {revenge_cnt}건")
+
+        # 큰 손실 (평균의 3배 이상)
+        _avg_abs = float(grp["net_pnl"].abs().mean())
+        _big_loss = grp[grp["net_pnl"] < -_avg_abs * 3]
+        if len(_big_loss) > 0:
+            flags.append(f"큰 손실 {len(_big_loss)}건")
+
+        # 과매매 (하루 평균의 2배)
+        if _j_mode == "일별" and len(grp) > _trades_per_day * 2:
+            flags.append(f"과매매 ({len(grp)}건)")
+
+        # 최고 수익 종목
+        _best_sym = grp.groupby("symbol")["net_pnl"].sum()
+        if len(_best_sym) > 0:
+            _top = _best_sym.idxmax()
+            _top_pnl = float(_best_sym.max())
+            _worst = _best_sym.idxmin()
+            _worst_pnl = float(_best_sym.min())
+
+        _j_summary.append({
+            "period": str(period),
+            "trades": len(grp),
+            "pnl": pnl,
+            "win_rate": wr,
+            "best": f"{_top} (+${_top_pnl:,.0f})" if len(_best_sym) > 0 and _top_pnl > 0 else "-",
+            "worst": f"{_worst} (${_worst_pnl:,.0f})" if len(_best_sym) > 0 and _worst_pnl < 0 else "-",
+            "flags": ", ".join(flags) if flags else "-",
+        })
+
+    _j_df = pd.DataFrame(_j_summary)
+    if not _j_df.empty:
+        _j_df = _j_df.sort_values("period", ascending=False)
+
+        # ── PnL 타임라인 ──────────────────────────
+        fig_j = go.Figure()
+        _j_colors = [_C["profit"] if v >= 0 else _C["loss"] for v in _j_df["pnl"]]
+        fig_j.add_trace(go.Bar(x=_j_df["period"], y=_j_df["pnl"], marker_color=_j_colors,
+            text=[f"${v:+,.0f}" for v in _j_df["pnl"]], textposition="outside", textfont=dict(size=10),
+            hovertemplate="%{x}<br>PnL: %{y:,.0f} USD<br><extra></extra>", name="PnL"))
+        _j_df_sorted = _j_df.sort_values("period")
+        fig_j.add_trace(go.Scatter(x=_j_df_sorted["period"], y=_j_df_sorted["trades"],
+            mode="lines+markers", name="거래 수", yaxis="y2",
+            line=dict(color=_C["secondary"], width=1.5), marker=dict(size=4)))
+        fig_j.update_layout(**{**_CHART, "height": 280}, xaxis_title="", yaxis_title="PnL (USD)",
+            yaxis2=dict(title="거래 수", side="right", overlaying="y"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
+        st.plotly_chart(fig_j, use_container_width=True)
+
+        # ── 요약 테이블 ────────────────────────────
+        st.markdown(f'<div class="section-hdr">{_period_label} 상세</div>', unsafe_allow_html=True)
+
+        for _, row in _j_df.iterrows():
+            _ps = "+" if row["pnl"] >= 0 else ""
+            with st.expander(f'{row["period"]}  |  {row["trades"]}건  |  {_ps}${row["pnl"]:,.0f}'):
+                ec1, ec2, ec3, ec4, ec5 = st.columns(5)
+                ec1.metric("PnL", f"${row['pnl']:,.2f}")
+                ec2.metric("거래 수", f"{row['trades']}건")
+                ec3.metric("승률", f"{row['win_rate']:.1f}%")
+                ec4.metric("최고 종목", row["best"])
+                ec5.metric("최저 종목", row["worst"])
+                if row["flags"] != "-":
+                    st.warning(f"특이사항: {row['flags']}")
+
+                # 해당 기간 거래 목록
+                if _j_mode == "주별":
+                    _period_trades = _jdf[_jdf["period"] == pd.Timestamp(row["period"]).date()]
+                else:
+                    _period_trades = _jdf[_jdf["date"] == pd.Timestamp(row["period"]).date()]
+                if not _period_trades.empty:
+                    # ── 캔들스틱 차트 + 진입/청산 마커 ────
+                    _pt = _period_trades.sort_values("datetime")
+                    _top_sym = _pt.groupby("symbol").size().nlargest(3).index.tolist()
+                    _timeframe = "15m" if _j_mode == "일별" else "4h"
+                    _tf_label = "15분봉" if _j_mode == "일별" else "4시간봉"
+
+                    # 기간 범위
+                    _p_start = pd.Timestamp(row["period"])
+                    if _j_mode == "주별":
+                        _p_end = _p_start + pd.Timedelta(days=7)
+                    else:
+                        _p_end = _p_start + pd.Timedelta(days=1)
+
+                    _has_exchange = False
+                    for _sym in _top_sym:
+                        _sym_trades = _pt[_pt["symbol"] == _sym]
+                        if _sym_trades.empty:
+                            continue
+
+                        # 거래소 연결 시 캔들 데이터 가져오기
+                        _ohlcv = pd.DataFrame()
+                        if is_any_connected() and fetch_ohlcv is not None:
+                            _ex_name = str(_sym_trades.iloc[0].get("exchange", ""))
+                            _ex_info = st.session_state.connections.get(_ex_name)
+                            if _ex_info:
+                                _ohlcv = fetch_ohlcv(
+                                    _ex_info["instance"], _sym,
+                                    _timeframe, _p_start.to_pydatetime(), _p_end.to_pydatetime())
+                                if not _ohlcv.empty:
+                                    _has_exchange = True
+
+                        fig_candle = go.Figure()
+
+                        if not _ohlcv.empty:
+                            # 캔들스틱
+                            fig_candle.add_trace(go.Candlestick(
+                                x=_ohlcv["datetime"], open=_ohlcv["open"],
+                                high=_ohlcv["high"], low=_ohlcv["low"], close=_ohlcv["close"],
+                                increasing_line_color=_C["profit"], decreasing_line_color=_C["loss"],
+                                increasing_fillcolor=_C["profit"], decreasing_fillcolor=_C["loss"],
+                                name=_tf_label, showlegend=False))
+
+                        # 진입 마커
+                        for _, t in _sym_trades.iterrows():
+                            _tc = _C["profit"] if t["net_pnl"] > 0 else _C["loss"]
+                            _arrow = "triangle-up" if t["side"] == "LONG" else "triangle-down"
+                            # 진입점
+                            fig_candle.add_trace(go.Scatter(
+                                x=[t["datetime"]], y=[t["entry_price"]],
+                                mode="markers+text", marker=dict(size=10, color=_tc, symbol=_arrow,
+                                    line=dict(width=1, color="white")),
+                                text=["IN"], textposition="top center", textfont=dict(size=9, color=_tc),
+                                showlegend=False,
+                                hovertemplate=f"{t['side']} 진입<br>가격: {t['entry_price']:,.2f}<br>레버리지: {t['leverage']}x<extra></extra>"))
+                            # 청산점
+                            fig_candle.add_trace(go.Scatter(
+                                x=[t["datetime"] + pd.Timedelta(minutes=t["holding_minutes"])],
+                                y=[t["exit_price"]],
+                                mode="markers+text", marker=dict(size=10, color=_tc, symbol="x",
+                                    line=dict(width=1, color="white")),
+                                text=["OUT"], textposition="bottom center", textfont=dict(size=9, color=_tc),
+                                showlegend=False,
+                                hovertemplate=f"{t['side']} 청산<br>가격: {t['exit_price']:,.2f}<br>PnL: {t['net_pnl']:+,.2f} USD<extra></extra>"))
+                            # 진입→청산 연결선
+                            fig_candle.add_trace(go.Scatter(
+                                x=[t["datetime"], t["datetime"] + pd.Timedelta(minutes=t["holding_minutes"])],
+                                y=[t["entry_price"], t["exit_price"]],
+                                mode="lines", line=dict(color=_tc, width=1.5, dash="dot"),
+                                showlegend=False, hoverinfo="skip"))
+
+                        _chart_title = f"{_sym} {_tf_label}" if not _ohlcv.empty else f"{_sym} 진입/청산"
+                        fig_candle.update_layout(**{**_CHART, "height": 350},
+                            title=dict(text=_chart_title, font=dict(size=13, color="#7b7b9e")),
+                            yaxis_title="가격", xaxis_title="",
+                            xaxis_rangeslider_visible=False)
+                        st.plotly_chart(fig_candle, use_container_width=True)
+
+                    if not _has_exchange and is_any_connected():
+                        st.caption(f"캔들 데이터를 가져올 수 없습니다. ({_tf_label})")
+                    elif not is_any_connected():
+                        st.caption("거래소 연결 시 캔들스틱 차트가 표시됩니다.")
+
+                    # ── 거래 목록 테이블 ──────────────
+                    _show = _period_trades[["datetime", "symbol", "side", "entry_price", "exit_price", "leverage", "pnl_usdt", "fee_usdt", "holding_minutes"]].copy()
+                    _show["datetime"] = _show["datetime"].astype(str)
+                    _show.columns = ["시간", "종목", "방향", "진입가", "청산가", "레버리지", "PnL", "수수료", "보유(분)"]
+                    st.dataframe(_show.sort_values("시간", ascending=False), use_container_width=True, height=200)

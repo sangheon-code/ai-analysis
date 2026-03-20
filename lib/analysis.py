@@ -282,88 +282,111 @@ def aggregate_deep_data(trades: pd.DataFrame, deposits: pd.DataFrame) -> dict:
 
 
 # ─────────────────────────────────────────────────
-# Claude 딥 리포트
+# 상세 분석 요약 (Haiku)
 # ─────────────────────────────────────────────────
-DEEP_REPORT_PROMPT = """당신은 트레이딩 코치입니다. 유저의 선물 거래 데이터를 분석합니다.
+DETAIL_SUMMARY_PROMPT = """당신은 트레이딩 데이터 분석가입니다.
+아래 상세 분석 데이터를 보고 3-4문장으로 핵심만 요약하세요.
 
-## 글쓰기 규칙 (제일 중요)
-- "~"(물결표) 사용 금지. 숫자 범위는 "-"(하이픈) 사용 (예: 3-5개, 10-20%)
-- 중학생도 이해할 수 있게 쉽게 쓰세요
-- 전문 용어 금지. "disposition effect" 같은 말 쓰지 마세요. "수익 나면 빨리 팔고, 손실 나면 안 팔고 버티는 습관" 이렇게 쓰세요
-- 짧은 문장. 한 문장에 한 가지만.
-- 비교할 때는 진짜 차이가 큰 것만. 승률 14% vs 20%는 "천지차이"가 아님. 30% vs 70% 같은 게 진짜 차이.
-- "$" 대신 "USD" 사용
-- 뻔한 소리 금지. "승률을 올리세요", "레버리지를 줄이세요" 같은 건 유저도 알고 있음
-
-## 데이터 구조
-- basic_stats: 기본 요약 (유저가 이미 대시보드에서 보는 것)
-- deep_data: 교차 분석 (여기서 패턴을 찾아야 함)
-
-## 리포트 구조 (마크다운)
-
-### 당신의 매매 스타일
-- 스캘퍼/단타/스윙 중 뭔지 판단
-- 보유 시간, 거래 빈도, 레버리지로 근거 제시
-- 스타일이 왔다갔다 하면 그것도 지적
-
-### 몰랐을 수도 있는 패턴
-종목×방향, 종목×요일, 시간대 교차 데이터에서 의외의 패턴만 뽑으세요.
-- 차이가 진짜 클 때만 언급 (승률 2배 이상, 손익 5배 이상 등)
-- 비슷비슷한 건 "비슷합니다" 한마디로 끝내세요
-- 3-5개
-
-### 매매 습관 진단
-복수매매, 연패 후 행동, 연승 후 행동 데이터를 쉬운 말로 풀어주세요.
-- "지고 나서 바로 다시 들어갔는데, 그때 판돈을 더 키웠음" 이런 식으로
-- "이긴 거래는 평균 OO분 들고 있었는데, 진 거래는 OO분이나 버팀" 이런 식으로
-- 데이터에 해당 패턴이 없으면 "이 부분은 특이사항 없음"으로 끝. 억지로 만들지 마세요
-
-### 이렇게 해보세요
-위 분석 근거로 구체적 행동 3개.
-각각:
-- 뭘 하라는 건지 (종목명, 시간, 숫자 포함)
-- 왜 그래야 하는지 (위 데이터 근거)
-- 거래소에서 어떻게 설정하는지
-추상적 조언 금지. "멘탈 관리하세요" 같은 거 쓰면 안 됨.
+규칙:
+- "$" 대신 "USD", "~" 대신 "-" 사용
+- 뻔한 소리 금지. 유저가 차트를 보면 알 수 있는 건 생략.
+- 교차 분석에서 발견되는 비직관적 패턴 위주.
+- 구체적 숫자 포함 (종목명, 승률, 금액).
+- 한국어. 짧은 문장.
 """
 
 
-def call_claude_deep_report(basic_stats: dict, deep_data: dict, api_key: str) -> str:
-    """Claude API로 딥 리포트 생성"""
+def generate_detail_summary(basic_stats: dict, deep_data: dict, api_key: str) -> dict:
+    """상세 분석 탭 상단 AI 요약 (Haiku)"""
     import anthropic
 
     client = anthropic.Anthropic(api_key=api_key)
 
-    user_prompt = f"""아래 거래 데이터를 분석해서 딥 리포트를 작성해주세요.
+    user_prompt = f"""### 기본 통계
+```json
+{json.dumps(basic_stats, ensure_ascii=False, indent=1, default=str)}
+```
+### 교차 분석
+```json
+{json.dumps(deep_data, ensure_ascii=False, indent=1, default=str)}
+```"""
 
-### 기본 통계 (유저가 이미 대시보드에서 보는 것)
+    message = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=400,
+        system=DETAIL_SUMMARY_PROMPT,
+        messages=[{"role": "user", "content": user_prompt}],
+    )
+
+    usage = message.usage
+    cost = usage.input_tokens * 0.80 / 1_000_000 + usage.output_tokens * 4 / 1_000_000
+
+    return {
+        "summary": message.content[0].text,
+        "cost_usd": round(cost, 6),
+    }
+
+
+# ─────────────────────────────────────────────────
+# Claude 액션 플랜 (레거시, 현재 미사용)
+# ─────────────────────────────────────────────────
+ACTION_PLAN_PROMPT = """당신은 트레이딩 코치입니다.
+유저는 이미 대시보드에서 차트와 지표를 다 봤습니다.
+당신은 데이터에서 사람이 놓치기 쉬운 교차 패턴을 찾아서 구체적 행동을 제안하는 역할입니다.
+
+## 글쓰기 규칙
+- "~"(물결표) 사용 금지. 범위는 "-" 사용 (예: 3-5개)
+- "$" 대신 "USD" 사용
+- 중학생도 알아듣게. 전문용어 금지.
+- 짧은 문장. 한 문장에 한 가지만.
+- 뻔한 소리 금지 (승률 올려라, 레버리지 줄여라, 멘탈 관리해라)
+- 비슷한 수치를 "큰 차이"라고 과장하지 마세요.
+
+## 출력 형식 (마크다운)
+정확히 3개의 행동을 제안하세요. 각각:
+
+### 1. [한줄 제목]
+- **근거**: 데이터에서 발견한 구체적 패턴 (종목명, 숫자 포함)
+- **행동**: 뭘 어떻게 바꾸라는 건지 (구체적으로)
+- **설정법**: 거래소에서 어떻게 세팅하는지
+
+뻔한 패턴 말고, 교차 분석(종목x방향, 종목x요일, 시간대, 연패 후 행동 등)에서
+사람이 직접 발견하기 어려운 것 위주로.
+"""
+
+
+def call_claude_action_plan(basic_stats: dict, deep_data: dict, api_key: str) -> dict:
+    """Claude API로 액션 플랜 생성 (3개 구체적 행동)"""
+    import anthropic
+
+    client = anthropic.Anthropic(api_key=api_key)
+
+    user_prompt = f"""아래 데이터를 보고 구체적 행동 3개를 제안해주세요.
+
+### 기본 통계
 ```json
 {json.dumps(basic_stats, ensure_ascii=False, indent=2, default=str)}
 ```
 
-### 교차 분석 데이터 (여기서 패턴을 찾아주세요)
+### 교차 분석
 ```json
 {json.dumps(deep_data, ensure_ascii=False, indent=2, default=str)}
 ```"""
 
     message = client.messages.create(
         model="claude-sonnet-4-20250514",
-        max_tokens=4000,
-        system=DEEP_REPORT_PROMPT,
+        max_tokens=1500,
+        system=ACTION_PLAN_PROMPT,
         messages=[{"role": "user", "content": user_prompt}],
     )
 
-    # 사용량 추적
     usage = message.usage
-    input_tokens = usage.input_tokens
-    output_tokens = usage.output_tokens
-    # Sonnet 4: input $3/MTok, output $15/MTok
-    cost = input_tokens * 3 / 1_000_000 + output_tokens * 15 / 1_000_000
+    cost = usage.input_tokens * 3 / 1_000_000 + usage.output_tokens * 15 / 1_000_000
 
     return {
         "report": message.content[0].text,
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
         "cost_usd": round(cost, 4),
     }
 
@@ -383,3 +406,65 @@ def get_api_balance(api_key: str) -> dict:
     except Exception:
         pass
     return {"ok": False}
+
+
+# ─────────────────────────────────────────────────
+# AI 챗 (자연어 거래 질문)
+# ─────────────────────────────────────────────────
+CHAT_SYSTEM = """당신은 트레이딩 데이터 분석 어시스턴트입니다.
+유저의 거래 데이터가 JSON으로 주어집니다. 유저의 질문에 데이터를 기반으로 답하세요.
+
+규칙:
+- 짧고 직접적으로 답하세요. 2-4문장.
+- 숫자를 인용하세요 (날짜, 금액, 승률 등).
+- "$" 대신 "USD" 사용.
+- "~" 대신 "-" 사용.
+- 데이터에 없는 건 "데이터에 없습니다"라고 하세요. 추측 금지.
+- 한국어로 답하세요.
+"""
+
+
+def chat_with_data(question: str, basic_stats: dict, deep_data: dict,
+                   chat_history: list, api_key: str) -> dict:
+    """거래 데이터 기반 자연어 질문 응답 (Haiku)"""
+    import anthropic
+
+    client = anthropic.Anthropic(api_key=api_key)
+
+    data_context = f"""### 거래 요약
+```json
+{json.dumps(basic_stats, ensure_ascii=False, indent=1, default=str)}
+```
+
+### 교차 분석
+```json
+{json.dumps(deep_data, ensure_ascii=False, indent=1, default=str)}
+```"""
+
+    messages = [{"role": "user", "content": f"내 거래 데이터:\n{data_context}"}]
+    messages.append({"role": "assistant", "content": "데이터를 확인했습니다. 질문해주세요."})
+
+    # 이전 대화 이어서
+    for msg in chat_history:
+        messages.append({"role": msg["role"], "content": msg["content"]})
+
+    # 현재 질문
+    messages.append({"role": "user", "content": question})
+
+    message = client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=500,
+        system=CHAT_SYSTEM,
+        messages=messages,
+    )
+
+    usage = message.usage
+    # Haiku: input $0.80/MTok, output $4/MTok
+    cost = usage.input_tokens * 0.80 / 1_000_000 + usage.output_tokens * 4 / 1_000_000
+
+    return {
+        "answer": message.content[0].text,
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+        "cost_usd": round(cost, 6),
+    }

@@ -489,6 +489,37 @@ def fetch_deposits_withdrawals(exchange, days: int = 90) -> pd.DataFrame:
     return df
 
 
+# ── OHLCV (캔들스틱) ──────────────────────────────
+def fetch_ohlcv(exchange, symbol: str, timeframe: str,
+                since_dt: datetime, until_dt: datetime) -> pd.DataFrame:
+    """거래소에서 OHLCV 데이터 가져오기. timeframe: '15m', '4h' 등"""
+    if exchange is None:
+        return pd.DataFrame()
+    try:
+        since_ms = int(since_dt.timestamp() * 1000)
+        until_ms = int(until_dt.timestamp() * 1000)
+        all_candles = []
+        cursor = since_ms
+        for _ in range(20):  # 최대 20 페이지
+            candles = exchange.fetch_ohlcv(symbol, timeframe, since=cursor, limit=500)
+            if not candles:
+                break
+            all_candles.extend(candles)
+            cursor = candles[-1][0] + 1
+            if cursor >= until_ms or len(candles) < 500:
+                break
+
+        if not all_candles:
+            return pd.DataFrame()
+
+        ohlcv = pd.DataFrame(all_candles, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        ohlcv["datetime"] = pd.to_datetime(ohlcv["timestamp"], unit="ms")
+        ohlcv = ohlcv[(ohlcv["timestamp"] >= since_ms) & (ohlcv["timestamp"] <= until_ms)]
+        return ohlcv
+    except Exception:
+        return pd.DataFrame()
+
+
 # ── 유틸 ─────────────────────────────────────────
 def _to_dataframe(rows: list) -> pd.DataFrame:
     """행 목록 → 정규화된 DataFrame"""
